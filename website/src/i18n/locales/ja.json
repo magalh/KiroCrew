@@ -14909,6 +14909,8 @@
         "soft_stop_budget_seconds": "ソフトストップ予算（秒）",
         "somewhat": "やや",
         "split_view_session_grid": "分割表示（セッショングリッド）",
+        "dim_inactive_panes": "非アクティブなペインを暗くする",
+        "dim_inactive_panes_desc": "分割表示で、キーボードフォーカスのないペインを暗くします。オフにすると、すべてのペインが通常の明るさのままになり、フォーカス中のペインはアクセントの枠線で示されます。",
         "subagent_effort": "サブエージェントの推論強度",
         "subagent_model": "サブエージェントモデル",
         "subagents": "サブエージェント",

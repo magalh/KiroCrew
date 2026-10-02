@@ -15375,6 +15375,8 @@
         "soft_stop_budget_seconds": "Orçamento de parada suave (segundos)",
         "somewhat": "Um pouco",
         "split_view_session_grid": "Visualização dividida (grade de sessões)",
+        "dim_inactive_panes": "Escurecer painéis inativos",
+        "dim_inactive_panes_desc": "Na visualização dividida, escurece cada painel sem o foco do teclado. Desativado, todos os painéis mantêm o brilho total e a borda de destaque marca o painel em foco.",
         "subagent_effort": "Esforço de subagente",
         "subagent_model": "Modelo de subagente",
         "subagents": "Subagentes",

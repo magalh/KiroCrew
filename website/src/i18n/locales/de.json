@@ -15142,6 +15142,8 @@
         "soft_stop_budget_seconds": "Zeitbudget für sanftes Stoppen (Sekunden)",
         "somewhat": "Etwas",
         "split_view_session_grid": "Geteilte Ansicht (Sitzungsraster)",
+        "dim_inactive_panes": "Inaktive Bereiche abdunkeln",
+        "dim_inactive_panes_desc": "Blendet in der geteilten Ansicht jeden Bereich ohne Tastaturfokus ab. Wenn aus, bleiben alle Bereiche voll hell, und der Akzentrahmen markiert den fokussierten Bereich.",
         "subagent_effort": "Subagent-Aufwand",
         "subagent_model": "Subagent-Modell",
         "subagents": "Subagenten",

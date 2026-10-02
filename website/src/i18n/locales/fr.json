@@ -15375,6 +15375,8 @@
         "soft_stop_budget_seconds": "Budget d'arrêt souple (secondes)",
         "somewhat": "Un peu",
         "split_view_session_grid": "Vue divisée (grille de sessions)",
+        "dim_inactive_panes": "Atténuer les volets inactifs",
+        "dim_inactive_panes_desc": "En vue divisée, atténue chaque volet qui n’a pas le focus clavier. Si désactivé, tous les volets gardent leur pleine luminosité et la bordure d’accent signale le volet actif.",
         "subagent_effort": "Effort des sous-agents",
         "subagent_model": "Modèle de sous-agent",
         "subagents": "Sous-agents",

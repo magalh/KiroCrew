@@ -15375,6 +15375,8 @@
         "soft_stop_budget_seconds": "Margen de parada suave (segundos)",
         "somewhat": "Algo técnico",
         "split_view_session_grid": "Vista dividida (cuadrícula de sesiones)",
+        "dim_inactive_panes": "Atenuar paneles inactivos",
+        "dim_inactive_panes_desc": "En la vista dividida, atenúa cada panel que no tiene el foco del teclado. Si está desactivado, todos los paneles conservan el brillo completo y el borde de acento marca el panel enfocado.",
         "subagent_effort": "Esfuerzo de subagente",
         "subagent_model": "Modelo de subagente",
         "subagents": "Subagentes",

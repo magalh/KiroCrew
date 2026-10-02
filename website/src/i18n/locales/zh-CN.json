@@ -14909,6 +14909,8 @@
         "soft_stop_budget_seconds": "软停止预算（秒）",
         "somewhat": "略懂",
         "split_view_session_grid": "分屏视图（会话网格）",
+        "dim_inactive_panes": "淡化非活动窗格",
+        "dim_inactive_panes_desc": "在分屏视图中，淡化没有键盘焦点的窗格。关闭后，所有窗格保持正常亮度，聚焦的窗格由强调色边框标示。",
         "subagent_effort": "子代理推理强度",
         "subagent_model": "子代理模型",
         "subagents": "子代理",

@@ -15375,6 +15375,8 @@
         "soft_stop_budget_seconds": "Budget per l'arresto graduale (secondi)",
         "somewhat": "In parte",
         "split_view_session_grid": "Vista divisa (griglia delle sessioni)",
+        "dim_inactive_panes": "Attenua i riquadri inattivi",
+        "dim_inactive_panes_desc": "Nella vista divisa, attenua ogni riquadro che non ha il focus della tastiera. Se disattivato, tutti i riquadri restano a piena luminosità e il bordo in evidenza indica quello attivo.",
         "subagent_effort": "Sforzo dei subagent",
         "subagent_model": "Modello del subagente",
         "subagents": "Subagenti",

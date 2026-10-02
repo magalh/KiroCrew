@@ -981,6 +981,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "chat.dim-inactive-panes",
+    "label": "Dim Inactive Panes",
+    "labelKey": "pages.settings.chatPanel.dim_inactive_panes",
+    "description": "In split view, fade every pane that does not have keyboard focus. When off, all panes stay at full brightness and the accent border marks the focused one.",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "sessions"
+    }
+  },
+  {
     "id": "chat.double-click-to-edit-your-messages",
     "label": "Double-click to edit your messages",
     "labelKey": "pages.settings.chatPanel.double_click_to_edit",

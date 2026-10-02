@@ -6812,6 +6812,8 @@
         "model_picker_selected_models": "Selected {{selected}} / {{total}}",
         "maximum_characters_retained_in_the_completion_ev": "Maximum characters retained in the completion event after applying the truncation mode. 0 disables truncation entirely. Default {{n}}.",
         "opt_in_split_the_chat_into_resizable_session_pan": "Opt-in: split the chat into resizable session panes ({{mod}}+D). Experimental.",
+        "dim_inactive_panes": "Dim Inactive Panes",
+        "dim_inactive_panes_desc": "In split view, fade every pane that does not have keyboard focus. When off, all panes stay at full brightness and the accent border marks the focused one.",
         "search_models": "Search models…",
         "selectable_models": "Selectable Models",
         "selectable_models_description": "Choose which advertised models appear in Chat model pickers. Auto and an active session model always remain visible.",
