@@ -38,6 +38,14 @@ import { canGoBack, canGoForward } from '../lib/routeHistoryPosition'
 import { useGuardedHistoryStep } from '../components/NavigationLeaveGuard'
 import { MOBILE_BREAKPOINT } from './useIsMobile'
 import { isEditableTarget } from '../utils/editableTarget'
+import { closeShownCrewWindow, crewWindowShown } from '../pages/chat/crew-window/crewWindowStore'
+
+/** Shortcuts scoped to the session on screen (see the crew-window guard). */
+const CREW_WINDOW_SCOPED: ReadonlySet<string> = new Set([
+  'close-chat', 'focus-input', 'focus-approval',
+  'cycle-agent', 'cycle-prev-agent', 'cycle-reasoning', 'cycle-prev-reasoning',
+  'cycle-approval', 'cycle-prev-approval', 'cycle-model', 'cycle-prev-model',
+])
 
 /**
  * Group ids + ordering live in the registry (`lib/shortcutRegistry`); re-exported
@@ -1044,6 +1052,14 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
       }
       // Every `registry` entry has an action here (shortcutRegistry.test pins the
       // two sets). An id without one is left unclaimed rather than swallowed.
+      // A crew window covers the local session: shortcuts that act on "the
+      // current session" must not reach the hidden one. Close closes the
+      // window; the rest do nothing there.
+      if (crewWindowShown() && CREW_WINDOW_SCOPED.has(hit)) {
+        e.preventDefault()
+        if (hit === 'close-chat') closeShownCrewWindow()
+        return
+      }
       const action = Object.prototype.hasOwnProperty.call(actions, hit) ? actions[hit] : undefined
       if (action) {
         e.preventDefault()

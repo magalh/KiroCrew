@@ -23,12 +23,11 @@ import { useConnected } from '../hooks/useConnected'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from '../components/ui/dropdown-menu'
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from '../components/ui/context-menu'
 import { offlineProps } from '../utils/offline'
-import { switchSlot, createSlot, deleteSlot, fetchHistory, resumeFromHistory, deleteHistorySession, selectSidebarWorkflowActive, selectAutomationForSlot } from '../store/chatSlice'
+import { switchSlot, deleteSlot, fetchHistory, resumeFromHistory, deleteHistorySession, selectSidebarWorkflowActive, selectAutomationForSlot } from '../store/chatSlice'
 import { slotIsRemoteBound } from '../store/dashboardSlice'
 import { IS_MAC } from '../hooks/useKeyboardShortcuts'
 import { api, SEARCH_MIN_CHARS } from '../api/client'
 import { errMessage } from '../utils/thunkError'
-import { findReport } from '../utils/errorReport'
 import { computeRecentRank, recencyTintShadow, clampTintCount } from '../utils/recencyTint'
 import { folderOffersHide } from '../utils/folderVisibility'
 import { groupHistoryByFolder } from '../utils/groupHistoryByFolder'
@@ -102,6 +101,7 @@ import type { Slot, SourceLinkState, SidebarSourceLink, HistoryItem, AgentInfo, 
 import { HIDDEN_FOLDERS_LS_KEY, FOLDERS_SHELVED_LS_KEY, FLAT_VIEW_LS_KEY } from './chat-sidebar/persistence'
 import { SESSION_FILTERS, useSessionFilterState, useSessionStatusFilters } from './chat-sidebar/filters'
 import { useDebouncedSessionSearch, useSearchMatches } from './chat-sidebar/search'
+import { openCrewWindow, useCrewWindow } from './chat/crew-window/crewWindowStore'
 import { isPeerRow, sessionRowIdentity, historyRowIdentity, localSlotFolder, isLocallyPinned, compareLocalPinnedThenSort } from './chat-sidebar/rowIdentity'
 import { useSessionSources } from './chat-sidebar/sessionSources'
 import { useSessionRename, useFolderRename } from './chat-sidebar/rename'
@@ -883,55 +883,12 @@ interface SessionRowProps {
    *  creator it admits only as an ANCHOR, so the workers that creator opened
    *  have something to hang from. */
   onOpenElsewhere?: () => void
-  /** ADOPT a row whose session lives on a remote instance: create a local slot
-   *  bound to that peer session and switch to it. Distinct from `onSelectSlot`
-   *  because there is no local slot to switch to YET — this is what makes one. */
-  onAdoptPeerSession?: (instanceId: string, remoteSlot: string, rowIdentity: string) => void
-  /** An adopt for THIS row is in flight. The peer's transcript is backfilled
-   *  server-side before the response, so the round-trip is long enough that a row
-   *  with no feedback reads as a dead click. */
-  adoptPending?: boolean
-  /** Why the last adopt of THIS row failed, already resolved to display text.
-   *  Empty renders nothing. */
-  adoptError?: string
+  /** Open a row whose session lives on a remote instance as a window onto the
+   *  peer's own slot. Distinct from `onSelectSlot` because the session has no
+   *  local slot: the peer owns it. */
+  onOpenPeerSession?: (instanceId: string, remoteSlot: string) => void
   onOpenSlotInNewTab?: (key: string, opts?: { background?: boolean }) => void
   onOpenSource?: (slotKey: string, link: { url: string; kind: 'change' | 'issue' }) => boolean
-}
-
-/** Display text for a FAILED peer-session adopt, preferring the backend's own
- * machine-readable `code` over its prose.
- *
- * Why the code has to be recovered from the error journal rather than read off
- * the error: the adopt goes through `dispatch(createSlot(...)).unwrap()`, and RTK
- * serializes a thrown error down to its string fields — so `ApiError.status` and
- * `ApiError.body` are GONE by the time this runs, and `parseErrorCode(err.body)`
- * (the pattern every non-thunk call site uses) reads `undefined`. `apiFailure`
- * journals the status and the code keyed by the message that DOES survive, which
- * is what `findReport` looks back up. See `utils/thunkError`'s module doc.
- *
- * `adopt_target_unknown` gets copy that names the crew, because its backend
- * sentence does not; anything else shows the backend's own sentence (`apiFailure`
- * already unwrapped it out of the `{error, code}` envelope), and a fixed sentence
- * is the floor — a failed click must never render nothing, which is the defect
- * this exists to fix.
- *
- * `remote_bind_failed` deliberately has NO case of its own. The backend collapses
- * every refusal on the bind leg to that one code — a dead tunnel, but also a
- * version-parity refusal ("This crew runs Kiro Crew 0.6.0 but this machine runs
- * 0.7.0 …") — and only its sentence tells them apart. A fixed "could not reach"
- * string here would render a healthy, reachable crew as unreachable and hide the
- * one line that tells the user which end to update. The sentence is always present
- * for a journaled code: `findReport` matches on a non-empty message, so a code
- * with no message is unreachable and a fallback for it would be dead code. */
-function adoptFailureText(err: unknown, crewName: string): string {
-  const message = errMessage(err)
-  switch (findReport(message)?.code) {
-    // The peer no longer lists that session (closed there, or never adoptable).
-    case 'adopt_target_unknown':
-      return i18nT('pages.chatSidebar.adopt_target_unknown', { name: crewName })
-    default:
-      return message || i18nT('pages.chatSidebar.adopt_failed')
-  }
 }
 
 /** One sidebar session row behind a memo boundary, so the 200+ row bodies do
@@ -948,7 +905,7 @@ const SessionRow = memo(function SessionRow({
   isRenaming, renamingHere, renameValue, revealFlash, dragInFlight, activeDraggedKey, activeDraggedPinnedIndex, onNativeDragStart, onNativeDragEnd, pinnedOrderIndex, pinnedReorderEnabled, onPinnedKeyboardReorder, rowAnimEnabled,
   defaultAgent, mode, isMobile, colorMode, installedAgents, tagById, paletteColors, boost, boostFor,
   renameInputRef, onRenameStart, onRenameChange, onRenameCommit, onRenameCancel,
-  onDuplicate, onCloseSession, onMenuCloseAutoFocus, onSelectSlot, onOpenSlotInNewTab, onOpenSource, onAdoptPeerSession, adoptPending, adoptError,
+  onDuplicate, onCloseSession, onMenuCloseAutoFocus, onSelectSlot, onOpenSlotInNewTab, onOpenSource, onOpenPeerSession,
   onOpenElsewhere,
 }: SessionRowProps) {
   sessionRowRenderProbe.current?.(s.key)
@@ -965,7 +922,7 @@ const SessionRow = memo(function SessionRow({
   // The affordance gate proper. A peer row and a row that opens elsewhere are
   // withheld the SAME set -- rename, close, fork, drag, the row menu -- for the
   // same reason: this sidebar does not own the slot's lifecycle. They differ only
-  // in what a click does (adopt vs. navigate), which the handlers below decide.
+  // in what a click does (open a window vs. navigate), which the handlers below decide.
   const foreignRow = !!peerId || onOpenElsewhere != null
   const peerName = s.peer_name || s.peer_id
   const rowIdentity = sessionRowIdentity(s)
@@ -1288,60 +1245,6 @@ const SessionRow = memo(function SessionRow({
     // The tail is `last_message`, and the `unread` dot rides on it (below).
     const rowState = ([
       {
-        // ADOPT feedback, on the row the user just clicked. It sits at the TOP
-        // because it describes THEIR in-flight action, not the session's own
-        // state, and it lives INSIDE this resolver rather than beside it: the
-        // resolver renders exactly one secondary line (`session-row-fixed-height`
-        // in website/AUTOSDE.yaml — "ONE status line, and only one"), so a running
-        // peer row that is also adopting would otherwise render two lines and grow
-        // the row.
-        //
-        // Through `ErrorNotice`, not a hand-rolled tinted div: the shared surface
-        // carries `role="alert"` and recovers the endpoint/status/code from the
-        // error journal. `askAgent` is OFF — the hand-off navigates away, and this
-        // row sits beside a composer that may hold a draft.
-        // `messageClassName="truncate"` is what keeps this to ONE line. The
-        // resolver already guarantees one status ENTRY, but `ErrorNotice` wraps a
-        // long message by default (`overflowWrap: anywhere`), so a localized
-        // failure string was still able to grow the row past its fixed height --
-        // the same `session-row-fixed-height` rule, reached from the other side.
-        // Truncating rather than dropping the component: `errors-use-error-notice`
-        // requires an error to BE an `ErrorNotice`, so the two rules together
-        // leave exactly this shape. `messageTooltip` carries the whole sentence:
-        // the row is one line wide, and the server's reason ("This crew runs Kiro
-        // Crew 0.6.0 but this machine runs 0.7.0 …") puts the actionable half past
-        // the clip. `truncate` + `title` is the shape `session-row-fixed-height`
-        // itself prescribes for a field that does not fit.
-        key: 'peer_adopt_error',
-        when: !!peerId && !adoptPending && !!adoptError,
-        build: () => (
-          <>
-            {/* No hand-off: the adjacent composer may contain an unsaved draft. */}
-            <ErrorNotice
-              message={adoptError || ''}
-              messageTooltip={adoptError || undefined}
-              variant="inline"
-              messageClassName="truncate"
-              testId="session-peer-adopt-error"
-            />
-          </>
-        ),
-      },
-      {
-        // A peer-row click is a network round-trip that includes a server-side
-        // transcript backfill, so it is slow enough that silence reads as a dead
-        // click. Several peer rows can be adopting independently, which is why
-        // this is per-row and not a page-level banner.
-        key: 'peer_adopt_pending',
-        when: !!peerId && !!adoptPending,
-        build: () => (
-          <div className={ROW_STATUS_LINE_MUTED_CLS} data-testid="session-peer-adopt-pending">
-            <Loader2 size={10} className="animate-spin shrink-0 text-accent" aria-hidden="true" />
-            <span className="truncate min-w-0">{i18nT('pages.chatSidebar.opening_session_locally')}</span>
-          </div>
-        ),
-      },
-      {
         // Pending approval outranks running (mirrors the Board's inferLane,
         // which returns its approval lane before the running check), so an owed
         // approval is never hidden behind a "Thinking…" spinner.
@@ -1594,7 +1497,7 @@ const SessionRow = memo(function SessionRow({
         // opened locally the local slot wins the identity dedupe, `peerId` is
         // gone, and the line goes with it.
         key: 'peer_not_open_here',
-        when: !!peerId && !adoptPending,
+        when: !!peerId,
         build: () => (
           <div className={ROW_STATUS_LINE_MUTED_CLS} data-testid="session-peer-not-open-here">
             <span className="truncate min-w-0">{i18nT('pages.chatSidebar.not_open_here_yet', { name: peerName || '' })}</span>
@@ -1789,9 +1692,6 @@ const SessionRow = memo(function SessionRow({
           data-session-container={holdContainer}
           aria-current={isActive ? 'true' : undefined}
           aria-disabled={!connected}
-          // An adopt in flight is a pending state ON THIS ROW, so a screen reader
-          // hears "busy" rather than nothing while the peer transcript backfills.
-          aria-busy={peerId && adoptPending ? 'true' : undefined}
           aria-keyshortcuts={dndRow && pinnedReorderEnabled && isPinned ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
           onKeyDown={e => {
             if (dndRow && pinnedReorderEnabled && isPinned && e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey
@@ -1837,7 +1737,7 @@ const SessionRow = memo(function SessionRow({
             if ((e.target as HTMLElement) !== e.currentTarget) return // don't hijack inner buttons
             e.preventDefault()
             if (!connected) return
-            if (peerId) { onAdoptPeerSession?.(peerId, s.key, rowIdentity); return }
+            if (peerId) { onOpenPeerSession?.(peerId, s.key); return }
             if (onOpenElsewhere) { onOpenElsewhere(); return }
             dispatch(switchSlot({ key: s.key, announceOnMissing: true }))
             onSelectSlot?.(s.key)
@@ -1883,15 +1783,13 @@ const SessionRow = memo(function SessionRow({
             // /forking still works — those are local ops (or short-circuit) that
             // don't depend on gateway state.
             if (!connected) return
-            // A peer-owned row has no local slot yet, so `switchSlot` would
-            // resolve nothing and clear the transcript. ADOPT it instead: create a
-            // local slot bound to that peer session, backfill its transcript, and
-            // switch to THAT — the click opens the session the row names, in the
-            // local pane, which is what every other row's click means. (The
-            // federated Older-Sessions rows still switch panes; a history row has
-            // no live peer slot to bind.) A remote-EXECUTED local slot falls
-            // through to `switchSlot` below, because its transcript IS here.
-            if (peerId) { onAdoptPeerSession?.(peerId, s.key, rowIdentity); return }
+            // A peer-owned row has no local slot, so `switchSlot` would resolve
+            // nothing and clear the transcript. It opens as a window onto the
+            // peer's own slot instead (CrewChatWindow). (The federated
+            // Older-Sessions rows still switch panes; a history row has no live
+            // peer slot.) A remote-EXECUTED local slot falls through to
+            // `switchSlot` below, because its transcript IS here.
+            if (peerId) { onOpenPeerSession?.(peerId, s.key); return }
             // A row whose session belongs to another page: the pane cannot show
             // it, so `switchSlot` would land on a transcript the surface filter
             // hides and leave the user on the previous one. Go where it lives.
@@ -2335,6 +2233,9 @@ interface ChatSidebarProps {
    *  not a live slot, because the composer stages it until send. Never fired for
    *  incognito/temporary sessions or for the already-active session. */
   onDropSessionRef?: (ref: { key: string; title: string; messages?: number }) => void
+  /** Where a crew row's window opens, for a host with no chat pane of its
+   *  own (embed/sessions). Omit to open it over this page's pane. */
+  onOpenPeerSession?: (instanceId: string, key: string) => void
 }
 
 /** Sort options, in menu order. The label lives in `SORT_LABEL_KEY`. */
@@ -2415,7 +2316,7 @@ export { SIDEBAR_MIN, SIDEBAR_MAX } from './chat/sidebarWidth'
  * Owner hooks are called where their block used to sit, so React runs their effects in
  * the order the sidebar has always run them; ChatSidebar.ownerComposition.test.ts pins
  * that call order. SessionRow, the row and folder render closures, the filter-dimension
- * registry, the peer-session adopt, the idle-session cleanup, the bulk model switch and
+ * registry, the idle-session cleanup, the bulk model switch and
  * the JSX stay in this file: source pins read them here (the switchSlot call-site
  * count, list-shell parity, the bulk switcher, the filter registry, the restyle
  * ratchet), and the render closures stamp rows in paint order. The owner table and
@@ -2431,7 +2332,7 @@ function ChatSidebar({
   // only the binding is scoped, which forces every call site inside this file
   // to say which collection it means.
   slots: localSlots, activeSlot, unreadSlots, history, historyHasMore,
-  defaultAgent, installedAgents, mode, onWidthChange, onDragChange, onSelectSlot, onOpenSlotInNewTab, onOpenSource, collapsible,
+  defaultAgent, installedAgents, mode, onWidthChange, onDragChange, onSelectSlot, onOpenSlotInNewTab, onOpenSource, onOpenPeerSession, collapsible,
   chatDropTarget, onDropSessionRef, staticRows,
 }: ChatSidebarProps) {
   useLanguageGeneration() // memo() bails out of the provider-level repaint; subscribe directly
@@ -2492,99 +2393,16 @@ function ChatSidebar({
     historySearchResults, instancesList, instanceSessions, remoteSessionsError, allRows, allLiveSlots,
     selectInstance,
   } = useSessionSources({ historyFilter, slotTitleDigest, localSlots })
-  // Adopt state, keyed by ROW IDENTITY (`<peerId>:<key>`) rather than raw slot
-  // key: a peer key can be byte-identical to a local one, and to another peer's,
-  // so a raw-key map would show one row's failure on another row. Two separate
-  // maps because they are two different facts and both can be true of different
-  // rows at once.
-  const [adoptPending, setAdoptPending] = useState<Record<string, boolean>>({})
-  const [adoptErrors, setAdoptErrors] = useState<Record<string, string>>({})
-  // Read inside the click handler to refuse a SECOND adopt of a row already in
-  // flight. The backend is idempotent (a repeat pair returns the same local
-  // slot), so this is not a correctness guard — it is what stops an impatient
-  // double-click spending two round-trips and two transcript backfills.
-  const adoptPendingRef = useRef(adoptPending)
-  adoptPendingRef.current = adoptPending
-  // The active slot AT COMPLETION time. `activeSlot` closed over by the mutation
-  // body is the value from the render that started the adopt, which is precisely
-  // the stale one — the question this answers is whether the user has moved since.
-  const activeSlotRef = useRef(activeSlot)
-  activeSlotRef.current = activeSlot
-  const adoptPeerSessionMutation = useMutation({
-    mutationFn: async ({ instanceId, remoteSlot }: { instanceId: string; remoteSlot: string; identity: string }) => {
-      // ADOPT, not mint: `adoptRemoteSlot` names the peer session that already
-      // exists, so the local slot this creates binds to it instead of to a fresh
-      // one. Modelled on `createRemoteChatMutation` — same `createSlot` thunk,
-      // same stay-local stance, and deliberately NO `selectInstance`: staying put
-      // is the whole point, because the session now opens HERE.
-      //
-      // `activate: false` so ONE piece of code decides whether the view moves.
-      // `createSlot.fulfilled` already refuses to activate when the user
-      // navigated elsewhere during the round-trip, but this path needs its own
-      // `switchSlot` (that is what loads the transcript, not just what sets
-      // `activeSlot`) — and an unconditional one overrode exactly the decision
-      // that guard had just made. Duplicating the comparison here instead would
-      // race it: on the guard's success path the reducer moves `activeSlot` to
-      // the new key, so a check against the pre-adopt origin cannot tell "the
-      // user moved" from "the reducer moved". Opting out of reducer activation
-      // removes that ambiguity: `activeSlot` can now only differ because the
-      // USER moved.
-      const origin = activeSlotRef.current
-      const created = await dispatch(
-        createSlot({ instanceId, adoptRemoteSlot: remoteSlot, activate: false }),
-      ).unwrap()
-      // The adopt round-trip is a real network call to the peer and can span
-      // seconds over a tunnel, so switching sessions while it spins is an
-      // ordinary thing to do — not a race worth ignoring.
-      if (activeSlotRef.current === origin) {
-        // Plain dispatch rather than `.unwrap()`: the adopt SUCCEEDED, so a slow
-        // or failing transcript fetch is `switchSlot`'s own error to report on
-        // the pane, not a reason to tell the row its adopt failed.
-        dispatch(switchSlot({ key: created.key, announceOnMissing: true }))
-        onSelectSlot?.(created.key)
-      }
-      return created
-    },
-    onSuccess: (_data, variables) => {
-      // Drop the cached peer listing for THIS crew. The backend stops listing an
-      // adopted session, but that only takes effect on the next fetch — until
-      // then the cached peer row co-exists with the freshly created local slot in
-      // `allRows` ([...localSlots, ...instanceSessions.rows], which does not
-      // dedupe), so the user sees the session they just opened twice. Scoped to
-      // the one crew rather than the whole query family: the other crews' rows did
-      // not change, and refetching them would spend a tunnel round-trip each.
-      void queryClient.invalidateQueries({ queryKey: ['instance-slots', variables.instanceId] })
-    },
-    onSettled: (_data, _err, variables) => {
-      setAdoptPending(prev => {
-        if (!prev[variables.identity]) return prev
-        const next = { ...prev }
-        delete next[variables.identity]
-        return next
-      })
-    },
-    onError: (err: unknown, variables) => {
-      // The crew's DISPLAY name, resolved here rather than threaded up from the
-      // row: `useMutation` reads its callbacks fresh each render, so closing over
-      // `instancesList` is safe where closing over it in the stable
-      // `adoptPeerSession` callback below would not be.
-      const crewName = instancesList.find(i => i.id === variables.instanceId)?.name || variables.instanceId
-      setAdoptErrors(prev => ({ ...prev, [variables.identity]: adoptFailureText(err, crewName) }))
-    },
-  })
-  const adoptMutateRef = useRef(adoptPeerSessionMutation.mutate)
-  adoptMutateRef.current = adoptPeerSessionMutation.mutate
-  // Stable for the life of the component, because it is a prop of every memoized
-  // SessionRow — the same reasoning as the `selectInstanceRef` indirection this
-  // replaced: react-query's mutation object takes a fresh identity every render,
-  // so closing over it directly would re-render EVERY row on every shell commit
-  // (the regression `ChatSidebar.rowMemo.test.tsx` exists to catch). The ref is
-  // rewritten each render and read inside a never-changing callback.
-  const adoptPeerSession = useCallback((instanceId: string, remoteSlot: string, identity: string) => {
-    if (adoptPendingRef.current[identity]) return
-    setAdoptPending(prev => ({ ...prev, [identity]: true }))
-    setAdoptErrors(prev => (prev[identity] ? { ...prev, [identity]: '' } : prev))
-    adoptMutateRef.current({ instanceId, remoteSlot, identity })
+  // Opening a crew row is local and instant: the window reads the peer's slot
+  // itself, so nothing is created here and there is nothing to wait on.
+  const crewWindow = useCrewWindow()
+  const onOpenPeerSessionRef = useRef(onOpenPeerSession)
+  onOpenPeerSessionRef.current = onOpenPeerSession
+  const openPeerSession = useCallback((instanceId: string, remoteSlot: string) => {
+    // A host with no chat pane of its own (the embedded Sessions list) says
+    // where the window opens; otherwise it opens over this page's pane.
+    if (onOpenPeerSessionRef.current) onOpenPeerSessionRef.current(instanceId, remoteSlot)
+    else openCrewWindow({ instanceId, key: remoteSlot })
   }, [])
   // Connected crews, for the "New chat on crew" entry. `warm` is the authority
   // on which peers hold a live tunnel (it holds the loopback port + minted
@@ -2788,8 +2606,10 @@ function ChatSidebar({
   // NEXT row to decide dividers; a lane that forgot the mask would be a bug
   // nobody notices until two rows glow at once.
   const isActiveRow = useCallback(
-    (s: Slot | null | undefined): boolean => !!s && !isPeerRow(s) && activeSlot === s.key,
-    [activeSlot],
+    (s: Slot | null | undefined): boolean => !!s && (isPeerRow(s)
+      ? !!crewWindow && crewWindow.instanceId === s.peer_id && crewWindow.key === s.key
+      : !crewWindow && activeSlot === s.key),
+    [activeSlot, crewWindow],
   )
   // The two halves render either side of the expander, so a held row crossing it
   // leaves the sub-list the anchor was measured against. Freeze the side instead.
@@ -3321,7 +3141,7 @@ function ChatSidebar({
   const {
     crewPreview, openCrewMembers, remoteCrewChatPreview,
     createChatMutation, createRemoteChatMutation, createEphemeralChatMutation,
-  } = useSessionCreate({ setNewChatError, dispatch, defaultAgent, mode, onOpenSlotInNewTab, setRemoteCrewError, setNewChatMenuOpen })
+  } = useSessionCreate({ setNewChatError, dispatch, defaultAgent, mode, onOpenSlotInNewTab, setRemoteCrewError, setNewChatMenuOpen, onOpenPeerSession })
   // A conductor-lane member anchor opens on the Members page (see renderSessionRow).
   const navigate = useNavigate()
   // The Dynamic Dashboard is a Feature Preview (Settings > Developer): the
@@ -3665,9 +3485,7 @@ function ChatSidebar({
         title={s.title && s.title !== s.key ? s.title : s.key}
         keepMounted={isActive || revealing || (!isPeer && renamingSlot === s.key) || (activeDrag?.type === 'session' && activeDrag.id === s.key) || (!isPeer && nativeSessionDrag === s.key)}>
       <SessionRow slot={s} orderStamp={orderStamp}
-        onAdoptPeerSession={adoptPeerSession}
-        adoptPending={isPeer && !!adoptPending[rowIdentity]}
-        adoptError={isPeer ? (adoptErrors[rowIdentity] || '') : ''}
+        onOpenPeerSession={openPeerSession}
         showDivider={showDivider} scope={scope} navScope={navScope} holdContainer={holdContainer} conductor={conductor}
         isActive={isActive} connected={connected} isOut={!isPeer && poppedOut.has(s.key)}
         isPinned={!isPeer && pinned.has(s.key)} isUnread={!isPeer && unreadSet.has(s.key)}

@@ -118,9 +118,8 @@ Object.defineProperty(window, 'matchMedia', {
 globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }) as unknown as typeof fetch
 
 import ChatSidebar from '../pages/ChatSidebar'
+import { closeCrewWindow } from '../pages/chat/crew-window/crewWindowStore'
 import { api } from '../api/client'
-import { ApiError } from '../api/apiError'
-import { recordError } from '../utils/errorReport'
 import type { ChatSlot, ChatHistoryItem } from '../types'
 import type { RootState } from '../store'
 
@@ -140,8 +139,10 @@ function renderSidebar({
   localNewerRemoteExecutor,
   localNewerRowIdentity,
   onOpenSlotInNewTab,
+  onOpenPeerSession,
   warmInstances = false,
 }: {
+  onOpenPeerSession?: (instanceId: string, key: string) => void
   activeSlot?: string
   localNewerRunning?: boolean
   localNewerPinned?: boolean
@@ -224,6 +225,7 @@ function renderSidebar({
               defaultAgent={'default'}
               installedAgents={[]}
               onOpenSlotInNewTab={onOpenSlotInNewTab}
+              onOpenPeerSession={onOpenPeerSession}
             />
           </MemoryRouter>
         </ThemeProvider>
@@ -595,156 +597,39 @@ describe('ChatSidebar – remote crew sessions merge into the list', () => {
     expect(remoteRow!.textContent).not.toMatch(/dashboard/i)
   })
 
-  it('adopts the peer session into a fresh LOCAL slot instead of switching panes', async () => {
-    // THE BEHAVIOURAL CLAIM OF THIS FEATURE. The click used to hand the whole app
-    // over to the peer's dashboard pane; it must now bind the peer session to a new
-    // local slot and stay put. Asserted on BOTH sides, because either half alone
-    // passes for the wrong reason: an adopt that ALSO pane-switches still teleports
-    // the user away, and a click that merely stops switching opens nothing at all.
+  it('opens the peer session as a window, creating no local slot', async () => {
+    // The peer OWNS a crew session: the click opens a window onto the peer's own
+    // slot and creates nothing here. Asserted on all three sides: no local slot,
+    // no pane switch, and the window names the PEER's own key.
     localStorage.setItem(PREVIEW_INSTANCE_SESSIONS, '1')
-    vi.mocked(api.createChatSlot).mockResolvedValue({ key: 'chat-local-adopted' } as ChatSlot)
+    closeCrewWindow()
     const { container } = renderSidebar()
 
     await waitFor(() => expect(container.textContent).toContain('REMOTE middle row'))
-    const remoteRow = Array.from(container.querySelectorAll('[data-session-row]'))
-      .find(row => row.textContent?.includes('REMOTE middle row'))
-    fireEvent.click(remoteRow!)
+    const remoteRow = () => Array.from(container.querySelectorAll('[data-session-row]'))
+      .find(row => row.textContent?.includes('REMOTE middle row'))!
+    fireEvent.click(remoteRow())
 
-    await waitFor(() => expect(vi.mocked(api.createChatSlot)).toHaveBeenCalled())
-    // Positional, because that IS the wire: `instance_id` names the owning crew and
-    // `adopt_remote_slot` the peer session's own key, exactly the pair the listing
-    // row handed us. A mint would send the instance and NO adopt key.
-    const args = vi.mocked(api.createChatSlot).mock.calls.at(-1)!
-    expect(args[8]).toBe('inst-a')
-    expect(args[9]).toBe('chat-9')
-    // The pane switch must never be reached.
+    await waitFor(() => expect(remoteRow().getAttribute('aria-current')).toBe('true'))
+    expect(vi.mocked(api.createChatSlot)).not.toHaveBeenCalled()
     expect(selectInstanceMock).not.toHaveBeenCalled()
+    expect(JSON.parse(sessionStorage.getItem('kirocrew.crewWindow') || 'null')).toEqual({ instanceId: 'inst-a', key: 'chat-9' })
+    closeCrewWindow()
   })
 
-  it('switches to the NEW LOCAL slot the adopt returns, not to the peer key', async () => {
-    // The adopted slot's key is minted locally and is NOT the peer's key — binding
-    // to `chat-9` while switching to `chat-9` would land on the peer row again (or
-    // on a colliding LOCAL slot, which is the collision this whole PR exists to
-    // keep apart). `chatSlotDetail` is `switchSlot`'s own read, so seeing the new
-    // key arrive there proves the switch followed the response rather than the row.
+  it('hands a crew row to a host with no chat pane of its own', async () => {
+    // The embedded Sessions list has no pane to draw the window in, so it
+    // says where the window opens; the store is left alone.
     localStorage.setItem(PREVIEW_INSTANCE_SESSIONS, '1')
-    vi.mocked(api.createChatSlot).mockResolvedValue({ key: 'chat-local-adopted' } as ChatSlot)
-    const { container } = renderSidebar()
+    closeCrewWindow()
+    const onOpenPeerSession = vi.fn()
+    const { container } = renderSidebar({ onOpenPeerSession })
 
     await waitFor(() => expect(container.textContent).toContain('REMOTE middle row'))
-    const remoteRow = Array.from(container.querySelectorAll('[data-session-row]'))
-      .find(row => row.textContent?.includes('REMOTE middle row'))
-    fireEvent.click(remoteRow!)
-
-    await waitFor(() =>
-      expect(vi.mocked(api.chatSlotDetail).mock.calls.some(c => c[0] === 'chat-local-adopted')).toBe(true))
-    expect(vi.mocked(api.chatSlotDetail).mock.calls.some(c => c[0] === 'chat-9')).toBe(false)
-  })
-
-  it('does NOT yank the view onto the adopted slot when the user switched away mid-adopt', async () => {
-    // `createSlot.fulfilled` already refuses to activate a new slot when the user
-    // navigated elsewhere during the round-trip. This path has its own
-    // `switchSlot` (that is what loads the transcript), and an unconditional one
-    // overrode exactly that decision — the user clicked a peer row, moved to
-    // another session while the peer call was in flight, and got yanked back.
-    //
-    // The adopt is a real network trip to the peer and can span seconds over a
-    // tunnel, so this is an ordinary sequence, not a contrived race.
-    localStorage.setItem(PREVIEW_INSTANCE_SESSIONS, '1')
-    vi.mocked(api.chatSlotDetail).mockClear()
-    let release: (slot: ChatSlot) => void = () => {}
-    vi.mocked(api.createChatSlot).mockReturnValue(
-      new Promise<ChatSlot>(resolve => { release = resolve }),
-    )
-    const { container, setActiveSlot } = renderSidebar({ activeSlot: 's1' })
-
-    await waitFor(() => expect(container.textContent).toContain('REMOTE middle row'))
-    const remoteRow = Array.from(container.querySelectorAll('[data-session-row]'))
-      .find(row => row.textContent?.includes('REMOTE middle row'))
-    fireEvent.click(remoteRow!)
-
-    // Wait until the peer call is genuinely OPEN before moving. `mutate` runs its
-    // body in a microtask, so switching first could beat the origin capture and
-    // the test would pass for the wrong reason.
-    await waitFor(() => expect(vi.mocked(api.createChatSlot).mock.calls.length).toBeGreaterThan(0))
-
-    // The user moves on while the peer call is still open.
-    setActiveSlot('s-new')
-    release({ key: 'chat-adopted-while-away' } as ChatSlot)
-
-    // `chatSlotDetail` is `switchSlot`'s own read, so its absence for the adopted
-    // key is what proves the view was left where the user put it.
-    await new Promise(r => setTimeout(r, 0))
-    expect(vi.mocked(api.chatSlotDetail).mock.calls.some(c => c[0] === 'chat-adopted-while-away')).toBe(false)
-  })
-
-  it('renders ONE status line on a running peer row that is also adopting', async () => {
-    // website/AUTOSDE.yaml `session-row-fixed-height`: a row gets ONE status line,
-    // and only one. Adopt feedback used to render BESIDE the ordered resolver
-    // instead of inside it, so a peer row reporting an active remote turn showed
-    // its running line AND the adopting line at once and grew taller than every
-    // row around it. Both lines lead with a spinner, so counting spinners inside
-    // the row is what tells one line from two.
-    localStorage.setItem(PREVIEW_INSTANCE_SESSIONS, '1')
-    instanceChatSlotsMock.mockResolvedValueOnce([
-      {
-        key: 'remote-running',
-        title: 'REMOTE active turn',
-        last_turn_ts: new Date(Date.now() - 120_000).toISOString(),
-        running: true,
-      },
-    ])
-    // Never resolves, so the row stays in its adopting state for the assertion.
-    vi.mocked(api.createChatSlot).mockReturnValue(new Promise(() => {}) as Promise<ChatSlot>)
-    const { container } = renderSidebar()
-
-    await waitFor(() => expect(container.textContent).toContain('REMOTE active turn'))
-    const remoteRow = Array.from(container.querySelectorAll('[data-session-row]'))
-      .find(row => row.textContent?.includes('REMOTE active turn'))
-    expect(remoteRow!.querySelector('.animate-spin')).not.toBeNull()
-
-    fireEvent.click(remoteRow!)
-
-    await waitFor(() =>
-      expect(remoteRow!.querySelector('[data-testid="session-peer-adopt-pending"]')).not.toBeNull())
-    expect(remoteRow!.querySelectorAll('.animate-spin')).toHaveLength(1)
-  })
-
-  it('renders the crew\'s OWN refusal on a failed adopt, not a fixed "could not reach"', async () => {
-    // `remote_bind_failed` is ONE code for every refusal on the bind leg: a dead
-    // tunnel, but also a version-parity refusal from a crew that is up and answering.
-    // Only the backend's sentence tells them apart, so the row must show that
-    // sentence. A fixed "Could not reach astro" here told the user to reconnect a
-    // crew that was reachable, and hid the line naming which end to update.
-    localStorage.setItem(PREVIEW_INSTANCE_SESSIONS, '1')
-    const reason = 'This crew runs Kiro Crew 0.6.0 but this machine runs 0.7.0. '
-      + 'A session only runs on a crew at the same major.minor version — update whichever end is behind.'
-    // What `client.ts::apiFailure` does for a real 502 before it throws: journal the
-    // status and code keyed by the message, which is the only field that survives
-    // the thunk boundary (see `adoptFailureText`'s doc).
-    recordError({
-      source: 'api', message: reason, status: 502, code: 'remote_bind_failed',
-      endpoint: '/api/chat/slots', detail: JSON.stringify({ error: reason, code: 'remote_bind_failed' }),
-    })
-    vi.mocked(api.createChatSlot).mockRejectedValueOnce(new ApiError(502, reason))
-    const { container } = renderSidebar()
-
-    await waitFor(() => expect(container.textContent).toContain('REMOTE middle row'))
-    const remoteRow = Array.from(container.querySelectorAll('[data-session-row]'))
-      .find(row => row.textContent?.includes('REMOTE middle row'))
-    fireEvent.click(remoteRow!)
-
-    await waitFor(() =>
-      expect(remoteRow!.querySelector('[data-testid="session-peer-adopt-error"]')).not.toBeNull())
-    const noticeEl = remoteRow!.querySelector('[data-testid="session-peer-adopt-error"]')!
-    const shown = noticeEl.textContent ?? ''
-    expect(shown).toContain('0.6.0')
-    expect(shown).toContain('0.7.0')
-    expect(shown).not.toMatch(/could not reach/i)
-    // The row is one line wide and clips the sentence (`session-row-fixed-height`),
-    // so the whole reason must also ride a `title` tooltip -- the clipped half is
-    // the one that says what to do.
-    expect(noticeEl.querySelector('[title]')?.getAttribute('title')).toBe(reason)
+    fireEvent.click(Array.from(container.querySelectorAll('[data-session-row]'))
+      .find(row => row.textContent?.includes('REMOTE middle row'))!)
+    expect(onOpenPeerSession).toHaveBeenCalledWith('inst-a', 'chat-9')
+    expect(sessionStorage.getItem('kirocrew.crewWindow') || null).toBeNull()
   })
 
   it('keeps the PEER identity on the adopted row, so it is one row and not two', async () => {

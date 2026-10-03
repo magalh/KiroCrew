@@ -9748,6 +9748,307 @@ class TestProxyHandlerPolicy:
         assert _body(await api_instances_proxy(req))["code"] == "instances_manager_unavailable"
 
 
+class TestProxyRedactsPeerReplies:
+    """The window renders peer text straight from the proxy, so the proxy is
+    the read-path redaction point: a credential the peer emits never reaches
+    the browser, in a JSON body or in an SSE frame."""
+
+    SECRET = "AKIAIOSFODNN7EXAMPLE"
+
+    def _req(self, tmp_path, monkeypatch, *, path, chunks, content_type):
+        _enable(tmp_path, monkeypatch)
+        from kiro_crew.dashboard.handlers import source_providers as sp
+
+        monkeypatch.setattr(sp, "is_owner_dashboard_request", lambda r: True)
+        from kiro_crew.instances.registry import InstancesRegistry
+
+        async def _iter():
+            for c in chunks:
+                yield c
+
+        class _Mgr:
+            @contextlib.asynccontextmanager
+            async def proxy_request(self, iid, method, path, **kwargs):
+                yield types.SimpleNamespace(
+                    status=200,
+                    headers={"Content-Type": content_type},
+                    content=types.SimpleNamespace(iter_any=_iter),
+                )
+
+        reg = InstancesRegistry(path=tmp_path / "instances.json")
+        req = _FakeReq(_State(reg, _Mgr()), match={"id": "cd-1", "path": path})
+        req.method = "GET"
+        req.body_exists = False
+        return req
+
+    def test_every_forwarded_content_type_has_a_redaction_path(self):
+        """The proxy redacts JSON and SSE only, so it may forward nothing else:
+        a third allowed type would reach the window unredacted."""
+        from kiro_crew.dashboard.handlers_instances import _PROXY_RESP_ALLOW_CONTENT_TYPES
+
+        assert _PROXY_RESP_ALLOW_CONTENT_TYPES == frozenset(
+            {"application/json", "text/event-stream"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_json_body_strings_are_redacted(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard.handlers_instances import api_instances_proxy
+
+        doc = {"messages": [{"role": "assistant", "content": f"key {self.SECRET} here"}]}
+        raw = json.dumps(doc).encode()
+        # Split mid-secret: the proxy must redact the whole document, not chunks.
+        req = self._req(
+            tmp_path,
+            monkeypatch,
+            path="api/chat/slots/s1",
+            chunks=[raw[:20], raw[20:]],
+            content_type="application/json",
+        )
+        resp = await api_instances_proxy(req)
+        assert resp.status == 200
+        assert self.SECRET not in resp.body.decode()
+        assert _body(resp)["messages"][0]["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_json_escape_cannot_hide_a_secret(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard.handlers_instances import api_instances_proxy
+
+        hidden = '{"content": "\\u0041' + self.SECRET[1:] + '"}'
+        req = self._req(
+            tmp_path,
+            monkeypatch,
+            path="api/chat/slots/s1",
+            chunks=[hidden.encode()],
+            content_type="application/json",
+        )
+        resp = await api_instances_proxy(req)
+        assert self.SECRET not in json.dumps(_body(resp))
+
+    @pytest.mark.asyncio
+    async def test_too_deeply_nested_json_is_refused_not_forwarded(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard.handlers_instances import api_instances_proxy
+
+        deep = (b"[" * 200_000) + b'"' + self.SECRET.encode() + b'"' + (b"]" * 200_000)
+        req = self._req(
+            tmp_path,
+            monkeypatch,
+            path="api/chat/slots/s1",
+            chunks=[deep],
+            content_type="application/json",
+        )
+        resp = await api_instances_proxy(req)
+        assert resp.status == 502
+        assert _body(resp)["code"] == "proxy_reply_unredactable"
+
+    @pytest.mark.asyncio
+    async def test_a_leading_bom_cannot_hide_an_escaped_secret(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard.handlers_instances import api_instances_proxy
+
+        body = '\ufeff{"content": "\\u0041' + self.SECRET[1:] + '"}'
+        req = self._req(
+            tmp_path,
+            monkeypatch,
+            path="api/chat/slots/s1",
+            chunks=[body.encode()],
+            content_type="application/json",
+        )
+        resp = await api_instances_proxy(req)
+        assert self.SECRET not in json.dumps(_body(resp))
+
+    @pytest.mark.asyncio
+    async def test_json_python_cannot_decode_is_refused_not_forwarded(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard.handlers_instances import api_instances_proxy
+
+        body = '{"n": ' + "9" * 5000 + ', "content": "\\u0041' + self.SECRET[1:] + '"}'
+        req = self._req(
+            tmp_path,
+            monkeypatch,
+            path="api/chat/slots/s1",
+            chunks=[body.encode()],
+            content_type="application/json",
+        )
+        resp = await api_instances_proxy(req)
+        assert resp.status == 502
+        assert _body(resp)["code"] == "proxy_reply_unredactable"
+
+    @pytest.mark.asyncio
+    async def test_oversized_json_is_refused_not_forwarded(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard import handlers_instances as hi
+
+        monkeypatch.setattr(hi, "PROXY_REDACT_BUFFER_MAX_BYTES", 16)
+        req = self._req(
+            tmp_path,
+            monkeypatch,
+            path="api/chat/slots/s1",
+            chunks=[b'{"content": "' + self.SECRET.encode() + b'"}'],
+            content_type="application/json",
+        )
+        resp = await hi.api_instances_proxy(req)
+        assert resp.status == 502
+        assert _body(resp)["code"] == "proxy_reply_too_large"
+
+    @pytest.mark.asyncio
+    async def test_sse_frames_are_redacted_across_chunk_splits(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard import handlers_instances as hi
+
+        writes: list[bytes] = []
+
+        class _Resp:
+            def __init__(self):
+                self.headers: dict = {}
+
+            async def prepare(self, request):
+                return None
+
+            async def write(self, chunk):
+                writes.append(bytes(chunk))
+
+            async def write_eof(self):
+                return None
+
+        frame = json.dumps({"slot": "s1", "content": f"token {self.SECRET}"})
+        stream = f"event: chat_message\ndata: {frame}\n\nevent: dashboard\ndata: {{}}\n\n".encode()
+        cut = stream.index(self.SECRET.encode()) + 4
+        req = self._req(
+            tmp_path,
+            monkeypatch,
+            path="api/stream",
+            chunks=[stream[:cut], stream[cut:]],
+            content_type="text/event-stream",
+        )
+        monkeypatch.setattr(hi.web, "StreamResponse", lambda **kw: _Resp())
+        await hi.api_instances_proxy(req)
+        out = b"".join(writes).decode()
+        assert self.SECRET not in out
+        # Framing survives: both events, each still a parseable data line.
+        events = [e for e in out.split("\n\n") if e]
+        assert [e.splitlines()[0] for e in events] == ["event: chat_message", "event: dashboard"]
+        assert json.loads(events[0].splitlines()[1][len("data: ") :])["slot"] == "s1"
+
+
+class TestRedactSseEvent:
+    """The browser joins an event's data lines before parsing, so redaction
+    must see the joined payload, whatever the line ending."""
+
+    SECRET = "AKIA" + "IOSFODNN7EXAMPLE"
+
+    def test_secret_split_over_data_lines_behind_an_escape_is_redacted(self):
+        from kiro_crew.dashboard.handlers_instances import _redact_sse_event
+
+        event = (
+            'event: chat_message\ndata: {"slot": "s1",\ndata: "content": "\\u0041'
+            + self.SECRET[1:]
+            + '"}'
+        ).encode()
+        out = _redact_sse_event(event).decode()
+        payload = "\n".join(
+            line[len("data: ") :] for line in out.split("\n") if line.startswith("data:")
+        )
+        assert self.SECRET not in json.dumps(json.loads(payload))
+        assert json.loads(payload)["slot"] == "s1"
+
+    @pytest.mark.asyncio
+    async def test_a_bom_split_across_chunks_is_stripped(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard import handlers_instances as hi
+
+        writes: list[bytes] = []
+
+        class _Resp:
+            def __init__(self):
+                self.headers: dict = {}
+
+            async def prepare(self, request):
+                return None
+
+            async def write(self, chunk):
+                writes.append(bytes(chunk))
+
+            async def write_eof(self):
+                return None
+
+        payload = ('data: {"c": "\\u0041' + self.SECRET[1:] + '"}\n\n').encode()
+        stream = b"\xef\xbb\xbf" + payload
+        req = TestProxyRedactsPeerReplies()._req(
+            tmp_path,
+            monkeypatch,
+            path="api/stream",
+            chunks=[stream[:1], stream[1:2], stream[2:]],
+            content_type="text/event-stream",
+        )
+        monkeypatch.setattr(hi.web, "StreamResponse", lambda **kw: _Resp())
+        await hi.api_instances_proxy(req)
+        out = b"".join(writes).decode()
+        data = [line[len("data: ") :] for line in out.split("\n") if line.startswith("data:")]
+        assert self.SECRET not in json.dumps(json.loads("\n".join(data)))
+
+    @pytest.mark.asyncio
+    async def test_cr_line_ends_are_framed_before_redaction(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard import handlers_instances as hi
+
+        writes: list[bytes] = []
+
+        class _Resp:
+            def __init__(self):
+                self.headers: dict = {}
+
+            async def prepare(self, request):
+                return None
+
+            async def write(self, chunk):
+                writes.append(bytes(chunk))
+
+            async def write_eof(self):
+                return None
+
+        stream = ('data: {"a":\rdata: "\\u0041' + self.SECRET[1:] + '"}\r\r').encode()
+        req = TestProxyRedactsPeerReplies()._req(
+            tmp_path,
+            monkeypatch,
+            path="api/stream",
+            chunks=[stream[:14], stream[14:]],
+            content_type="text/event-stream",
+        )
+        monkeypatch.setattr(hi.web, "StreamResponse", lambda **kw: _Resp())
+        await hi.api_instances_proxy(req)
+        out = b"".join(writes).decode()
+        data = [line[len("data: ") :] for line in out.split("\n") if line.startswith("data:")]
+        assert self.SECRET not in json.dumps(json.loads("\n".join(data)))
+
+    @pytest.mark.asyncio
+    async def test_a_completed_event_over_the_cap_is_dropped(self, tmp_path, monkeypatch):
+        from kiro_crew.dashboard import handlers_instances as hi
+
+        writes: list[bytes] = []
+
+        class _Resp:
+            def __init__(self):
+                self.headers: dict = {}
+
+            async def prepare(self, request):
+                return None
+
+            async def write(self, chunk):
+                writes.append(bytes(chunk))
+
+            async def write_eof(self):
+                return None
+
+        monkeypatch.setattr(hi, "PROXY_REDACT_BUFFER_MAX_BYTES", 32)
+        big = ('data: "' + "x" * 64 + '"\n\n').encode()
+        req = TestProxyRedactsPeerReplies()._req(
+            tmp_path,
+            monkeypatch,
+            path="api/stream",
+            chunks=[b'data: "ok"\n\n' + big],
+            content_type="text/event-stream",
+        )
+        monkeypatch.setattr(hi.web, "StreamResponse", lambda **kw: _Resp())
+        await hi.api_instances_proxy(req)
+        out = b"".join(writes).decode()
+        assert '"ok"' in out
+        assert "x" * 64 not in out
+
+
 # ── _slugify hash fallback ─────────────────────────────────────────
 
 

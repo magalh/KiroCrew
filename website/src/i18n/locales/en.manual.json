@@ -4972,6 +4972,34 @@
         "remove_quote": "Remove quote",
         "jump_to_quoted_message": "Jump to the quoted message",
         "message_unavailable": "Can't jump to it — the original message is no longer in this conversation."
+      },
+      "crewWindow": {
+        "close": "Close crew chat",
+        "load_failed": "Could not load this session from {{name}}.",
+        "empty": "No messages yet.",
+        "rewind": "Rewind to here",
+        "approval_title": "The agent on {{name}} wants to run {{tool}}",
+        "approve": "Approve",
+        "reject": "Reject",
+        "stop": "Stop",
+        "interrupted": "Turn interrupted",
+        "continue": "Continue",
+        "regenerate": "Regenerate",
+        "action_failed": "{{name}} refused that action. Try again, or open the crew's own dashboard.",
+        "offline": "{{name}} is not connected. Reconnect it to send.",
+        "rewinding": "Rewinding: sending replaces the conversation from this message on.",
+        "cancel_rewind": "Cancel",
+        "placeholder": "Message the agent on {{name}}…",
+        "send": "Send",
+        "version_mismatch": "This crew runs {{productName}} {{peer}} but this machine runs {{local}}. Update one so they match.",
+        "create_unnamed": "The crew opened a session but did not name it.",
+        "close_hint": "Closing does not stop the agent on {{name}}.",
+        "approval_hint": "Approve runs this one command. Reject skips it; the agent continues without it.",
+        "feed_lost": "Lost live updates from {{name}}.",
+        "feed_lost_hint": "Updates stopped. Retry to catch up.",
+        "retry": "Retry",
+        "running_on_header": "On {{name}}",
+        "approval_elsewhere": "The agent on {{name}} is waiting for an approval this window cannot answer. Answer it on the crew's own dashboard."
       }
     },
     "chatPage": {
@@ -5053,9 +5081,7 @@
       "run_in_terminal_config_read_failed_error": "Your terminal settings couldn't be read, so \"reuse the current terminal\" was skipped and the command opened a new terminal instead. Reload to try again."
     },
     "chatSidebar": {
-      "adopt_failed": "Could not open this session here.",
       "no_sessions_match_folders": "No sessions match — only a folder name did",
-      "adopt_target_unknown": "This session is no longer open on {{name}}.",
       "answered_by": "answered by {{agent}}",
       "archive_session_one": "Archive {{count}} session",
       "archive_session_other": "Archive {{count}} sessions",
@@ -5086,7 +5112,6 @@
       "loop_waiting_title": "The last reply asked you to choose. Open the session to answer.",
       "loop_waiting_title_cycle": "Paused at cycle {{count}} of {{total}} — the last reply asked you to choose. Open the session to answer.",
       "loop_waiting_title_cycle_2": "Paused at cycle {{count}} — the last reply asked you to choose. Open the session to answer.",
-      "opening_session_locally": "Opening this session here…",
       "not_open_here_yet": "On {{name}} — click to open here",
       "on_instance": "On {{name}}",
       "opens_here_runs_on_instance": "Opens this session here — its turns keep running on {{name}}",

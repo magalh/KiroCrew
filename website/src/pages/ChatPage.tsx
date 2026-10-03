@@ -326,6 +326,8 @@ import { rewindWithRollback } from '../lib/rewindCall'
 import { isChatPageSurface } from '../utils/channelOrigin'
 import { sessionTitleRoster } from '../utils/sessionRoster'
 import { errMessage } from '../utils/thunkError'
+import CrewChatWindow from './chat/crew-window/CrewChatWindow'
+import { closeCrewWindow, crewWindowShown, useCrewWindow } from './chat/crew-window/crewWindowStore'
 
 
 import { i18nT } from '../i18n/t'
@@ -754,7 +756,29 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
    * drawer slide — on the same main thread that drives the slide's transform.
    * Keep every prop handed to ChatSidebar referentially stable.
    */
-  const clearSplitOnSelect = useCallback(() => setSplitMode(false), [])
+  const clearSplitOnSelect = useCallback(() => { setSplitMode(false); closeCrewWindow() }, [])
+  // A crew session opens as a window over the pane (see CrewChatWindow); a
+  // local session taking focus closes it. Only a MOVE between two local
+  // sessions counts, so the reload restore (none -> restored) keeps it open.
+  const storeCrewWindow = useCrewWindow()
+  // An embedded chat frame shares this tab's sessionStorage, so it shows a
+  // crew window only when its own URL names one (the embedded Sessions list
+  // navigates here with `?crew=&key=`); never the tab's stored one.
+  const embedCrew = searchParams.get('crew')
+  const embedCrewKey = searchParams.get('key')
+  const crewWindow = useMemo(
+    () => (embedded
+      ? (embedMode === 'chat' && embedCrew && embedCrewKey ? { instanceId: embedCrew, key: embedCrewKey } : null)
+      : popout ? null : storeCrewWindow),
+    [embedded, embedMode, popout, embedCrew, embedCrewKey, storeCrewWindow],
+  )
+  const openEmbeddedCrewWindow = useCallback((instanceId: string, key: string) => navigate(
+    `/embed/chat?crew=${encodeURIComponent(instanceId)}&key=${encodeURIComponent(key)}`), [navigate])
+  const prevActiveSlotRef = useRef(activeSlot)
+  useEffect(() => {
+    if (prevActiveSlotRef.current && activeSlot !== prevActiveSlotRef.current) closeCrewWindow()
+    prevActiveSlotRef.current = activeSlot
+  }, [activeSlot])
   /** Same contract as `clearSplitOnSelect`, for the `embedMode === 'sessions'`
    *  frame where the sidebar IS the whole page. */
   const navigateToEmbeddedSlot = useCallback((key: string) => navigate(`/embed/chat/${key}`), [navigate])
@@ -3027,7 +3051,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     if (embedMode) return
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'd') {
-        if (!splitFeatureEnabled || splitMode || !activeSlot) return
+        // A crew window covers the pane: never split the hidden local session.
+        if (!splitFeatureEnabled || splitMode || !activeSlot || crewWindowShown()) return
         e.preventDefault()
         enterSplit(activeSlot)
       }
@@ -4713,6 +4738,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // Close the drawer when a session is selected. Routed through closeSidebar so
   // it slides out — flipping straight to 'closed' would unmount it on the spot.
   useEffect(() => { if (isMobile) closeSidebar() }, [activeSlot]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (isMobile && crewWindow) closeSidebar() }, [crewWindow]) // eslint-disable-line react-hooks/exhaustive-deps
   // Leaving the mobile viewport: drop the panel with no slide. There is no
   // mobile drawer to animate on the other side of that crossing, and the
   // desktop sidebar owns its own open state. The history entry goes with it —
@@ -5377,6 +5403,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             onWidthChange={setSidebarWidth}
             onDragChange={setSidebarDragging}
             onSelectSlot={navigateToEmbeddedSlot}
+            onOpenPeerSession={openEmbeddedCrewWindow}
           />
         </div>
       ) : (
@@ -5490,6 +5517,12 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       {/* Chat pane */}
       {embedMode !== 'sessions' && (
       <div ref={setChatPaneEl} className={`relative flex flex-col bg-bg min-w-0 min-h-0 h-full overflow-hidden ${(activityOpen && !activitySlot) || search.isOpen ? 'flex-[1_1_60%]' : 'flex-1'}`} style={{ transition: 'flex 0.2s', ...(!sidebarOpen && !isMobile ? { marginLeft: -COLLAPSED_PANE_RECLAIM_PX } : {}), '--mc-content-width': scaleContentWidth(CONTENT_WIDTH[chatConfig.contentWidth], chatConfig.contentWidth, chatConfig.messageFontSize).messages, '--mc-input-width': scaleContentWidth(CONTENT_WIDTH[chatConfig.contentWidth], chatConfig.contentWidth, chatConfig.messageFontSize).input } as React.CSSProperties}>
+        {crewWindow && (
+          <div className="absolute inset-0 z-[48] bg-bg" data-crew-cover>
+            <CrewChatWindow key={`${crewWindow.instanceId}:${crewWindow.key}`} target={crewWindow}
+              onClose={embedded ? () => navigate('/embed/sessions') : undefined} />
+          </div>
+        )}
         {snipFrame && (
           <SnipOverlay
             frame={snipFrame}
