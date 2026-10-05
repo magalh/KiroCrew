@@ -609,3 +609,80 @@ def test_benign_match_pattern_still_passes():
     src = "def f(p):\n    match p:\n        case complex(real=r, imag=i):\n            return r + i\n"
     ok, findings = validate_skill_script("run.py", src)
     assert ok is True, findings
+
+
+def test_rejects_builtins_bypass_via_bare_name():
+    """Block __builtins__ as a bare name to prevent .eval() bypass."""
+    for src in (
+        '__builtins__.eval("1+1")',
+        '__builtins__.exec("x=1")',
+        '__builtins__.compile("1", "<>", "eval")',
+        '__builtins__.__import__("os")',
+        'getattr(__builtins__, "eval")',
+        '__builtins__.__dict__["eval"]',
+    ):
+        ok, findings = validate_skill_script("run.py", src)
+        assert ok is False, f"Expected block for: {src}"
+        assert any("dangerous builtin name" in f for f in findings), (src, findings)
+
+
+def test_rejects_builtins_bypass_via_subscript():
+    """Block __builtins__/builtins as string keys in subscripts."""
+    for src in (
+        'vars()["__builtins__"]',
+        'globals()["__builtins__"]',
+        'import sys; sys.modules["builtins"]',
+    ):
+        ok, findings = validate_skill_script("run.py", src)
+        assert ok is False, f"Expected block for: {src}"
+        assert any("dangerous subscript key" in f or "dangerous module lookup" in f for f in findings), (src, findings)
+
+
+def test_rejects_reflection_attributes():
+    """Block __self__, __subclasses__, __loader__, __spec__ etc."""
+    for src in (
+        'print.__self__.eval("1+1")',
+        '().__class__.__subclasses__()',
+        '__loader__.load_module("builtins")',
+        '__spec__.loader',
+    ):
+        ok, findings = validate_skill_script("run.py", src)
+        assert ok is False, f"Expected block for: {src}"
+        # Multiple possible blocking messages
+        assert len(findings) > 0, (src, findings)
+
+
+def test_allows_benign_compile_execute():
+    """Allow re.compile and cursor.execute - not every .compile/.execute is dangerous."""
+    for src in (
+        'import re; re.compile(r"\\d+")',
+        'cursor.execute("SELECT * FROM t")',
+    ):
+        ok, findings = validate_skill_script("run.py", src)
+        assert ok is True, f"Unexpected block for benign: {src} -> {findings}"
+
+
+def test_builtins_bypass_fix_mutation_check():
+    """Mutation check: removing guards should make bypasses pass."""
+    from kiro_crew import skills_script_validator
+    
+    # Save original
+    orig_dangerous_attrs = skills_script_validator._DANGEROUS_ATTRS_ANY_BASE.copy()
+    orig_banned_keys = skills_script_validator._BANNED_STRING_KEYS.copy()
+    
+    try:
+        # Mutation 1: Remove __self__ from _DANGEROUS_ATTRS_ANY_BASE
+        skills_script_validator._DANGEROUS_ATTRS_ANY_BASE = orig_dangerous_attrs - {"__self__"}
+        ok, _ = validate_skill_script("run.py", 'print.__self__.eval("1+1")')
+        assert ok is True, "Removing __self__ should allow print.__self__ bypass"
+        skills_script_validator._DANGEROUS_ATTRS_ANY_BASE = orig_dangerous_attrs.copy()
+        
+        # Mutation 2: Remove __builtins__ from _BANNED_STRING_KEYS
+        skills_script_validator._BANNED_STRING_KEYS = orig_banned_keys - {"__builtins__"}
+        ok, _ = validate_skill_script("run.py", 'vars()["__builtins__"]')
+        assert ok is True, "Removing __builtins__ from BANNED_STRING_KEYS should allow vars bypass"
+        skills_script_validator._BANNED_STRING_KEYS = orig_banned_keys.copy()
+        
+    finally:
+        skills_script_validator._DANGEROUS_ATTRS_ANY_BASE = orig_dangerous_attrs
+        skills_script_validator._BANNED_STRING_KEYS = orig_banned_keys
