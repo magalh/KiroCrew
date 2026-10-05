@@ -104,7 +104,7 @@ def test_lists_every_scope_and_include(repo: Path, tmp_path: Path, monkeypatch) 
         "fromInclude",
         "local",
     ]
-    assert gch.config_hook_disable_pairs(repo)[0][0].endswith(".enabled")
+    assert any("enabled" in a for a in gch.config_hook_disable_args(repo))
 
 
 def test_two_part_hook_setting_is_not_a_name(repo: Path) -> None:
@@ -126,6 +126,23 @@ def test_too_many_names_is_refused(repo: Path) -> None:
             fh.write(f'[hook "h{i}"]\n\tcommand = true\n')
     with pytest.raises(gch.ConfigHookScanError, match="limit"):
         gch.config_hook_names(repo)
+
+
+def test_name_too_long_is_refused(repo: Path) -> None:
+    """A hook name over _MAX_HOOK_NAME_BYTES bytes cannot be passed as a -c arg."""
+    long_name = "x" * (gch._MAX_HOOK_NAME_BYTES + 1)
+    with (repo / ".git" / "config").open("a") as fh:
+        fh.write(f'[hook "{long_name}"]\n\tcommand = true\n')
+    with pytest.raises(gch.ConfigHookScanError, match="bytes"):
+        gch.config_hook_names(repo)
+
+
+def test_empty_hook_name_is_disabled(repo: Path) -> None:
+    """[hook ""] with event=pre-commit must not be silently skipped."""
+    with (repo / ".git" / "config").open("a") as fh:
+        fh.write('[hook ""]\n\tcommand = true\n\tevent = pre-commit\n')
+    args = gch.config_hook_disable_args(repo)
+    assert "hook..enabled=false" in args, args
 
 
 def test_unreadable_config_is_refused(repo: Path) -> None:

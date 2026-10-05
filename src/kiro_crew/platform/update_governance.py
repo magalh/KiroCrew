@@ -356,7 +356,7 @@ _REPO_EXEC_DRIVER_RE = re.compile(
     # `hook.<name>.command` (git 2.54+) is a hook defined in config. The name is the
     # repository's choice and `core.hooksPath` does not reach it, so no pin covers it.
     # `fetch` and `reset` fire `reference-transaction` and `post-index-change`.
-    r"|hook\.(?P<h>.+)\.(?:command|event))$",
+    r"|hook\.(?P<h>.*)\.(?:command|event))$",
     re.IGNORECASE,
 )
 

@@ -36,17 +36,23 @@ import os
 import subprocess
 from collections.abc import Mapping
 
+from kiro_crew import platform_compat
+
 __all__ = [
     "MAX_HOOK_NAMES",
     "ConfigHookScanError",
     "config_hook_disable_args",
-    "config_hook_disable_pairs",
     "config_hook_names",
 ]
 
 #: More names than this is refused rather than passed on: no real setup has this
 #: many, and each one costs two argv entries.
 MAX_HOOK_NAMES = 256
+
+#: Individual names longer than this (in UTF-8 bytes) cannot be passed as ``-c``
+#: arguments on any realistic platform without risking E2BIG. Reject them early
+#: so a single enormous name in the repository config cannot crash a call site.
+_MAX_HOOK_NAME_BYTES = 512
 
 _SCAN_TIMEOUT_SECS = 10
 
@@ -59,6 +65,24 @@ class ConfigHookScanError(RuntimeError):
     """The hook names could not be listed safely, so the git call must not run."""
 
 
+def _resolve_git(git: str) -> str | None:
+    """Resolve a git executable name to a trusted path.
+
+    When *git* is the literal ``"git"`` default, resolve through the trusted
+    system directories (``platform_compat.trusted_git_bin``). A planted shim on
+    an agent-writable PATH entry would otherwise run here with the gateway's full
+    credentials, because the scan subprocess inherits the unfiltered environment
+    before ``sandboxed_spawn_argv`` can strip it.
+
+    A caller that already holds a trusted absolute path passes it directly, and
+    it is returned unchanged. ``None`` means the binary cannot be resolved: the
+    caller should treat it as an empty scan rather than fall back to a bare name.
+    """
+    if git == "git":
+        return platform_compat.trusted_git_bin()
+    return git
+
+
 def config_hook_names(
     cwd: str | os.PathLike[str],
     *,
@@ -69,17 +93,22 @@ def config_hook_names(
 
     ``git`` and ``env`` should be what the real call uses, so both find the same
     binary and see the same config files. A ``cwd`` that is not a directory, or a
-    ``git`` that cannot be found, returns ``[]``: the real call fails on its own
-    there.
+    ``git`` that cannot be found in a trusted location, returns ``[]``: the real
+    call fails on its own there.
 
     Raises :class:`ConfigHookScanError` when the listing fails, when a name
     contains ``=`` (``-c`` splits on the first ``=``, so it could not be
-    disabled), or when there are more than :data:`MAX_HOOK_NAMES` names.
+    disabled), when any name exceeds :data:`_MAX_HOOK_NAME_BYTES`, or when there
+    are more than :data:`MAX_HOOK_NAMES` names.
     """
     if not os.path.isdir(cwd):
         return []
+    resolved = _resolve_git(git)
+    if resolved is None:
+        # git is not in a trusted location; the real call would also fail.
+        return []
     argv = [
-        git,
+        resolved,
         "-C",
         os.fspath(cwd),
         "-c",
@@ -122,11 +151,16 @@ def config_hook_names(
         if "." not in rest:
             continue  # `hook.jobs`: a setting, not a named hook
         name = rest[: rest.rindex(".")]
-        if not name or name in seen:
+        if name in seen:
             continue
         if "=" in name:
             raise ConfigHookScanError(
                 f"git hook name {name[:80]!r} contains '=' and cannot be disabled"
+            )
+        name_bytes = name.encode("utf-8", "surrogateescape")
+        if len(name_bytes) > _MAX_HOOK_NAME_BYTES:
+            raise ConfigHookScanError(
+                f"git hook name is {len(name_bytes)} bytes (limit {_MAX_HOOK_NAME_BYTES})"
             )
         seen.add(name)
         names.append(name)
@@ -135,20 +169,6 @@ def config_hook_names(
             f"git config defines {len(names)} hook names (limit {MAX_HOOK_NAMES})"
         )
     return names
-
-
-def config_hook_disable_pairs(
-    cwd: str | os.PathLike[str],
-    *,
-    git: str = "git",
-    env: Mapping[str, str] | None = None,
-) -> list[tuple[str, str]]:
-    """``(key, value)`` pairs that disable every config hook git sees in ``cwd``.
-
-    For callers that pass config through ``GIT_CONFIG_COUNT``/``KEY``/``VALUE``.
-    Empty when no hook is configured. Raises like :func:`config_hook_names`.
-    """
-    return [(f"hook.{name}.enabled", "false") for name in config_hook_names(cwd, git=git, env=env)]
 
 
 def config_hook_disable_args(
@@ -162,6 +182,6 @@ def config_hook_disable_args(
     Empty when no hook is configured. Raises like :func:`config_hook_names`.
     """
     args: list[str] = []
-    for key, value in config_hook_disable_pairs(cwd, git=git, env=env):
-        args += ["-c", f"{key}={value}"]
+    for name in config_hook_names(cwd, git=git, env=env):
+        args += ["-c", f"hook.{name}.enabled=false"]
     return args
