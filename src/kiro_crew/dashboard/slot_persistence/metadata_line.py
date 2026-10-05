@@ -751,8 +751,15 @@ def build_full_line(
         meta_line["memory_store"] = _named
     if slot.agent_kind:
         meta_line["agent_kind"] = slot.agent_kind
-    if slot.project:
-        meta_line["project"] = slot.project
+    # Written even when EMPTY, like the merge path above: a RECORDED empty
+    # project is the user's explicit clear and must survive a reopen, while a
+    # line with NO ``project`` key was written before the field existed (or by
+    # a rows-only save that never owned it). The member-thread open endpoint
+    # reads that difference -- it re-resolves the crew's workspace only for an
+    # unrecorded project, never for a recorded clear -- so omitting the key
+    # here would turn every clear into "never recorded" on the next full save
+    # and hand the directory back on the next open.
+    meta_line["project"] = slot.project
     # Remote-execution binding. All three are written together or not at
     # all: a half-restored binding (executor="remote" with no peer slot)
     # is the fail-closed refusal case, so persisting the marker without

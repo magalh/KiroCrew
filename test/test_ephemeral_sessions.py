@@ -223,6 +223,9 @@ class TestHistoryPersistence:
             "memory_mode": "incognito",
             "model": "",
             "autocompact_pct": None,
+            # Recorded even when empty: present-and-empty is a cleared project,
+            # absent is "never recorded" (which the member-thread open repairs).
+            "project": "",
             "tab_id": slot._tab_id,
         }
         assert "memory_store" not in meta

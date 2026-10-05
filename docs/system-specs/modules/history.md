@@ -918,7 +918,11 @@ no longer destroy older turns.
   and carries every key another layer owns (`carry_unowned_metadata`); a forced
   or closing save of a message-less slot merges instead, writing clearable fields
   even when empty because a merge cannot delete a key, and only into a line that
-  exists. `memory_mode` is the stricter of the retained mode (the slot's, folded
+  exists. `project` is written even when empty by BOTH writers, so the key's
+  presence carries meaning: present-and-empty is a recorded clear, absent is
+  "never recorded" -- the distinction the member-thread open endpoint reads
+  before resolving a crew's workspace onto a project-less DM
+  ([crew-mode](crew-mode.md)). `memory_mode` is the stricter of the retained mode (the slot's, folded
   with the session's execution record, live or durable) and the line's own, a carried
   `execution_context` record is tightened to match, and the committed tightening
   reaches the event loop through `pending_slot_memory_mode`. `last_user_at` is

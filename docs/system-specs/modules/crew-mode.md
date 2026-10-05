@@ -731,7 +731,18 @@ refer to the same workspace. Resolution finishes before publishing the slot;
 the first slot broadcast includes its project directory. A concurrent opener's
 existing slot is preserved. Reopening a live or restored
 thread keeps its saved workspace and project, including an explicitly empty
-project, rather than resetting a session choice to the member default.
+project, rather than resetting a session choice to the member default. "Saved"
+is read off the transcript's metadata line, where the full save writes
+`project` even when empty: a line WITH the key (a directory or `""`) is a
+recorded choice and is kept; a line with NO key was written before member
+threads inherited a project, and the open endpoint -- the only creator and
+repairer of member slots, so every open passes through it -- resolves the
+member's workspace for it exactly as a fresh mint would (off the event loop,
+compare-and-set on the still-empty project, recorded by the next periodic
+flush and pushed to the client). Without that repair such a thread's pinned
+Files tab reads "no project directory" on every reopen and restart, because the
+restore paths copy only a non-empty persisted project and nothing downstream
+re-resolves one.
 
 A newly created V2 member starts a fresh conversation. Existing V1 conversation
 and native provider context cannot acquire member memory by changing a label.

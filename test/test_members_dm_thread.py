@@ -801,11 +801,24 @@ class TestMemberRoutes:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("project", ["", "chosen-project"])
     async def test_reopening_live_member_preserves_explicit_project(self, tmp_path, project):
+        """A RECORDED project -- a directory or an explicit clear -- is the user's.
+
+        The empty case is the clear: the persisted line carries ``project: ""``
+        (``build_full_line`` writes the key even when empty), and reopening
+        must not hand the member workspace back over that choice.
+        """
         state = _make_state(tmp_path)
         slot = state.get_or_create_slot(
             member_slot_key(CREW), agent=CREW, mode=DM_SLOT_MODE, workspace="chosen"
         )
         slot.project = project
+        # A history line with no binding is refused as an orphan transcript
+        # (member_binding_missing), so bind before recording the choice.
+        write_dm_binding(CREW, member=CREW, slot_key=member_slot_key(CREW))
+        key = f"dashboard:{member_slot_key(CREW)}"
+        state.conversation_log.update_metadata(
+            key, {"agent": CREW, "mode": DM_SLOT_MODE, "project": project}
+        )
         with (
             _patched_config([CREW]),
             patch(
@@ -818,6 +831,100 @@ class TestMemberRoutes:
                 assert response.status == 200
         assert slot.workspace == "chosen"
         assert slot.project == project
+
+    @pytest.mark.asyncio
+    async def test_reopening_live_member_with_unrecorded_project_gets_the_workspace(
+        self, tmp_path, monkeypatch
+    ):
+        """A live project-less thread whose line never recorded a project is repaired.
+
+        A gateway restart restores member slots from lines written before member
+        DMs inherited a project; they come back with ``project == ""`` and, until
+        now, stayed that way -- the pinned Files tab read "no project directory"
+        for a crew that has a workspace. The open endpoint is the repairer.
+        """
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot(
+            member_slot_key(CREW), agent=CREW, mode=DM_SLOT_MODE, workspace="chosen"
+        )
+        slot.messages.append({"role": "user", "content": "hello"})
+        slot._dirty = False
+        write_dm_binding(CREW, member=CREW, slot_key=member_slot_key(CREW))
+        key = f"dashboard:{member_slot_key(CREW)}"
+        state.conversation_log.update_metadata(key, {"agent": CREW, "mode": DM_SLOT_MODE})
+        assert "project" not in state.conversation_log.get_metadata(key)
+        pushes = []
+        monkeypatch.setattr(state, "push_slots_update", lambda **kw: pushes.append(kw))
+        resolved = str(tmp_path / "team-workspace")
+        with (
+            _patched_config([CREW]),
+            patch(
+                "kiro_crew.dashboard.handlers.members.default_project_dir",
+                return_value=resolved,
+            ) as resolve,
+        ):
+            async with TestClient(TestServer(_make_members_app(state))) as client:
+                response = await client.post(f"/api/members/{CREW}/thread")
+                assert response.status == 200
+        assert slot.project == resolved
+        # Resolved through the member's workspace binding, not a bare default.
+        assert resolve.call_args.args == ("default",)
+        # The repair reaches disk via the periodic flush and the client via a push.
+        assert slot._dirty is True
+        assert pushes
+
+    @pytest.mark.asyncio
+    async def test_dormant_thread_without_recorded_project_rehydrates_with_the_workspace(
+        self, tmp_path
+    ):
+        """The reporter's case: an old DM transcript with no ``project`` key.
+
+        Rehydrate copies the project only when the line carries a non-empty one,
+        so without the repair every reopen of such a thread lands project-less.
+        """
+        state = _make_state(tmp_path)
+        write_dm_binding(CREW, member=CREW, slot_key=member_slot_key(CREW))
+        key = f"dashboard:{member_slot_key(CREW)}"
+        log = state.conversation_log
+        log.append(key, "user", "remember the roadmap discussion")
+        log.append(key, "assistant", "noted: roadmap discussion")
+        log.update_metadata(key, {"agent": CREW, "mode": DM_SLOT_MODE})
+        assert member_slot_key(CREW) not in state._slots
+        resolved = str(tmp_path / "team-workspace")
+        with (
+            _patched_config([CREW]),
+            patch(
+                "kiro_crew.dashboard.handlers.members.default_project_dir",
+                return_value=resolved,
+            ),
+        ):
+            async with TestClient(TestServer(_make_members_app(state))) as client:
+                resp = await client.post(f"/api/members/{CREW}/thread")
+                assert resp.status == 200
+        slot = state._slots[member_slot_key(CREW)]
+        assert slot.project == resolved
+        assert any("roadmap discussion" in str(m.get("content", "")) for m in slot.messages)
+
+    @pytest.mark.asyncio
+    async def test_dormant_thread_with_recorded_clear_rehydrates_project_less(self, tmp_path):
+        """``project: ""`` on the line is a recorded clear, not a missing field."""
+        state = _make_state(tmp_path)
+        write_dm_binding(CREW, member=CREW, slot_key=member_slot_key(CREW))
+        key = f"dashboard:{member_slot_key(CREW)}"
+        log = state.conversation_log
+        log.append(key, "user", "hello")
+        log.update_metadata(key, {"agent": CREW, "mode": DM_SLOT_MODE, "project": ""})
+        with (
+            _patched_config([CREW]),
+            patch(
+                "kiro_crew.dashboard.handlers.members.default_project_dir",
+                side_effect=AssertionError("a recorded clear was re-resolved"),
+            ),
+        ):
+            async with TestClient(TestServer(_make_members_app(state))) as client:
+                resp = await client.post(f"/api/members/{CREW}/thread")
+                assert resp.status == 200
+        assert state._slots[member_slot_key(CREW)].project == ""
 
     @pytest.mark.asyncio
     async def test_thread_reopen_rehydrates_dormant_history(self, tmp_path):

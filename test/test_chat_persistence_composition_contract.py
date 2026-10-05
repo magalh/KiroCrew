@@ -1317,7 +1317,7 @@ _GOLDEN: dict[str, dict] = {
     },
     "foreign_append": {
         "file": (
-            '{"_type": "metadata", "created_at": "2026-01-02T03:04:05", "last_consolidated": 0, "memory_mode": "persistent", "model": "", "autocompact_pct": null, "tab_id": "tab-golden-foreign"}\n'
+            '{"_type": "metadata", "created_at": "2026-01-02T03:04:05", "last_consolidated": 0, "memory_mode": "persistent", "model": "", "autocompact_pct": null, "project": "", "tab_id": "tab-golden-foreign"}\n'
             '{"role": "user", "content": "first", "ts": "2026-01-02T03:04:06", "source_thread": "dashboard", "source_user": "dashboard", "meta": {"mid": "m-1"}}\n'
             '{"role": "assistant", "content": "from cron", "ts": "2026-01-02T03:04:07", "source_thread": "cron"}\n'
             '{"role": "assistant", "content": "second", "ts": "2026-01-02T03:04:08", "source_thread": "dashboard", "source_user": "dashboard", "meta": {"mid": "m-2"}}\n'
@@ -1344,7 +1344,7 @@ _GOLDEN: dict[str, dict] = {
             ]
         ],
         "file": (
-            '{"_type": "metadata", "created_at": "2026-01-02T03:04:05", "last_consolidated": 0, "memory_mode": "persistent", "model": "", "autocompact_pct": null, "tab_id": "tab-golden-rewrite", "rotation_generation": 1}\n'
+            '{"_type": "metadata", "created_at": "2026-01-02T03:04:05", "last_consolidated": 0, "memory_mode": "persistent", "model": "", "autocompact_pct": null, "project": "", "tab_id": "tab-golden-rewrite", "rotation_generation": 1}\n'
             '{"role": "user", "content": "q1", "ts": "2026-01-02T03:04:06", "source_thread": "dashboard", "source_user": "dashboard", "meta": {"mid": "m-1"}}\n'
             '{"role": "assistant", "content": "a1", "ts": "2026-01-02T03:04:07", "source_thread": "dashboard", "source_user": "dashboard", "meta": {"mid": "m-2"}}\n'
         ),

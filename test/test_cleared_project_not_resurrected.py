@@ -83,3 +83,38 @@ class TestClearedProjectIsPersistedAsCleared:
 
         after = state.conversation_log._read_metadata(KEY).get("project")
         assert after == scoped, f"the merge dropped a live project; project={after!r}"
+
+
+class TestFullSaveRecordsAnEmptyProject:
+    """The FULL save (a slot WITH a window) writes ``project`` even when empty.
+
+    The merge above already does, so the two writers agree on what the key means
+    on disk: present-and-empty is a recorded clear, absent is "never recorded".
+    The member-thread open endpoint repairs only the second -- it re-resolves the
+    crew's workspace for a line with no key -- so a full save that omitted an
+    empty project would turn every clear into "never recorded" on the next flush
+    and hand the directory back on the next open.
+    """
+
+    def test_full_save_writes_project_key_for_a_cleared_slot(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot.messages.append({"role": "user", "content": "hello", "ts": "2026-01-01T00:00:00"})
+        slot.project = ""
+        _save_slot_to_history(state, slot, force=True)
+
+        meta = state.conversation_log._read_metadata(KEY)
+        assert "project" in meta, f"full save omitted the cleared project; meta={meta!r}"
+        assert meta["project"] == ""
+
+    def test_full_save_writes_a_live_project(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot.messages.append({"role": "user", "content": "hello", "ts": "2026-01-01T00:00:00"})
+        scoped = str(tmp_path / "scoped")
+        slot.project = scoped
+        _save_slot_to_history(state, slot, force=True)
+
+        assert state.conversation_log._read_metadata(KEY).get("project") == scoped

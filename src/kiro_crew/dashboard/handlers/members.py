@@ -885,6 +885,61 @@ def _member_thread_slot(cfg, member: str, slug: str) -> tuple[str, str]:
     return members_mod.member_slot_key(slug, store), store
 
 
+def _member_workspace_project(cfg: KiroCrewConfig, member: str) -> tuple[str, str]:
+    """Resolve a crew member's bound workspace: ``(workspace name, project dir)``.
+
+    The member's ``workspace`` name, falling back to ``default_workspace`` when
+    that name is undeclared, through the shared ``default_project_dir``
+    validation -- so provider cwd and project essentials refer to the same
+    directory. Blocking filesystem IO (realpath, isdir, sensitive-path fence):
+    callers run it off the event loop.
+    """
+    member_workspace = cfg.agents[member].workspace
+    if member_workspace not in cfg.workspaces:
+        member_workspace = cfg.default_workspace
+    return member_workspace, default_project_dir(member_workspace)
+
+
+async def _repair_unrecorded_member_project(
+    state: DashboardState, slot: Any, history_key: str, cfg: KiroCrewConfig, member: str
+) -> None:
+    """Give a project-less member thread its crew's workspace -- unless it was cleared.
+
+    A DM thread written before member slots inherited a project comes back from
+    every rehydrate and restart with ``slot.project == ""``: the restore paths
+    copy the field only when the persisted line carries a non-empty one, and
+    the fresh-mint branch of :func:`api_member_thread` is the only place that
+    ever resolved it. The pinned Files tab then shows "no project directory"
+    for a thread whose crew has a workspace. This endpoint is the documented
+    repairer of member slots (every open goes through it), so the repair lives
+    here, after the live/rehydrated/minted branches converge.
+
+    The one thing it must not undo is a deliberate clear. On disk the two read
+    differently (``metadata_line.build_full_line`` writes the key even when
+    empty): a line WITH a ``project`` key -- empty or not -- is a recorded
+    choice and is left alone; only a line with NO key is unrecorded and gets
+    the workspace. A slot whose project arrived while this request waited on
+    the worker thread keeps that value (compare-and-set on the empty string).
+    Writes nothing to disk itself: the dirty mark makes the next periodic
+    flush record the resolved directory, after which the line reads as a
+    recorded choice on every later open.
+    """
+    conv_log = state.conversation_log
+
+    def _project_recorded() -> bool:
+        if conv_log is None:
+            return False
+        return "project" in conv_log.get_metadata(history_key)
+
+    if await asyncio.to_thread(_project_recorded):
+        return
+    _, project = await asyncio.to_thread(_member_workspace_project, cfg, member)
+    if project and not slot.project:
+        slot.project = project
+        slot._dirty = True
+        state.push_slots_update()
+
+
 async def api_member_thread(request: web.Request) -> web.Response:
     """POST /api/members/{slug}/thread — idempotent get-or-create of a DM thread.
 
@@ -1032,15 +1087,16 @@ async def api_member_thread(request: web.Request) -> web.Response:
         # adopt_closed: this endpoint IS the deliberate reopen path for a
         # member thread, so a ✕-closed transcript reopens with its history.
         slot = await rehydrate_slot_from_history_async(state, slot_key, adopt_closed=True)
+    minted = False
     if slot is None:
-        member_workspace = cfg.agents[member_name].workspace
-        if member_workspace not in cfg.workspaces:
-            member_workspace = cfg.default_workspace
-        project = await asyncio.to_thread(default_project_dir, member_workspace)
+        member_workspace, project = await asyncio.to_thread(
+            _member_workspace_project, cfg, member_name
+        )
         # Resolve before publication, then re-check: another opener can create
         # the slot while path validation waits. Its project remains its choice.
         slot = state._slots.get(slot_key)
         if slot is None:
+            minted = True
             with state.suspend_slots_push():
                 slot = state.get_or_create_slot(
                     name=slot_key,
@@ -1090,6 +1146,19 @@ async def api_member_thread(request: web.Request) -> web.Response:
                 "code": "member_pin_mismatch",
             },
             status=409,
+        )
+
+    if not minted and not slot.project:
+        # Live (restart-restored) and rehydrated threads alike: the fresh mint
+        # above already resolved its own project, so only a thread that came
+        # back project-less is a candidate, and only an UNRECORDED one is
+        # repaired (a recorded clear is the user's choice; see the helper).
+        await _repair_unrecorded_member_project(
+            state,
+            slot,
+            members_mod.member_thread_session_alias(slug, generation),
+            cfg,
+            member_name,
         )
 
     member_store = getattr(cfg.agents[member_name], "memory_store", "")
