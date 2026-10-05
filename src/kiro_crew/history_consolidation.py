@@ -812,6 +812,12 @@ class HistoryConsolidator:
         self._tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
         # Track last activity per session for idle-based history consolidation
         self._last_activity: dict[str, float] = {}
+        # ``_last_activity`` lives in memory only, so after a restart a session
+        # nobody touches again would never be idle-checked. The first idle sweep
+        # seeds it once from the transcripts on disk (see _seed_last_activity).
+        self._activity_seeded = False
+        self._seeded_keys: set[str] = set()
+        self._seed_task: "asyncio.Task[None] | None" = None
         self._history_consolidated: dict[str, float] = {}  # key → last history consolidation time
         # Separate offset for prefs-only consolidation (doesn't advance main offset)
         self._prefs_offset: dict[str, int] = {}
@@ -1007,12 +1013,62 @@ class HistoryConsolidator:
             max(0.0, retry_at - _time.time()),
         )
 
+    def _busy(self, key: str) -> bool:
+        """True when *key*, or any other key naming the same transcript file, is running."""
+        target = self._log._path(key).name
+        return any(self._log._path(running).name == target for running in self._running)
+
+    def _scan_unconsolidated_transcripts(self) -> dict[str, float]:
+        """Map each transcript stem with an unconsolidated tail to its file mtime.
+
+        Blocking file IO: run off the event loop. A stem is a valid log key (the
+        ``kirocrew consolidate`` CLI addresses sessions the same way). Only
+        persistent transcripts qualify: ``_consolidate`` refuses every other
+        mode, and a refusal sets no throttle, so a private one would be
+        re-dispatched on every sweep.
+        """
+        found: dict[str, float] = {}
+        for path in sorted(self._log._dir.glob("*.jsonl")):
+            if path.is_symlink() or path.stem.startswith(("memory-consolidation", "subagent_")):
+                continue
+            try:
+                mtime = path.stat().st_mtime
+                mode = self._log.get_metadata(path.stem).get("memory_mode") or "persistent"
+                if mode == "persistent" and self._log.unconsolidated_count(path.stem) > 0:
+                    found[path.stem] = mtime
+            except Exception:
+                _HISTORY_LOGGER.debug("idle seed skipped %s", path.name, exc_info=True)
+        return found
+
+    async def _seed_last_activity(self) -> None:
+        """Seed ``_last_activity`` once from disk; a live key always wins."""
+        from kiro_crew.history import _safe_key  # circular: history re-exports this module
+
+        try:
+            found = await asyncio.to_thread(self._scan_unconsolidated_transcripts)
+        except Exception:
+            _HISTORY_LOGGER.warning("idle seed scan failed", exc_info=True)
+            return
+        tracked = {_safe_key(key) for key in self._last_activity}
+        for stem, mtime in found.items():
+            if stem not in tracked:
+                self._last_activity[stem] = mtime
+                self._seeded_keys.add(stem)
+
     def maybe_consolidate(self, key: str) -> None:
         """Fire preferences/projects consolidation if message threshold exceeded."""
         self._last_activity[key] = _time.time()
+        if self._seeded_keys:
+            # The live key now tracks this transcript; drop its seeded stem alias.
+            from kiro_crew.history import _safe_key  # circular: history re-exports this module
+
+            stem = _safe_key(key)
+            if stem != key and stem in self._seeded_keys:
+                self._seeded_keys.discard(stem)
+                self._last_activity.pop(stem, None)
         if _persistence_disabled():
             return
-        if key in self._running:
+        if self._busy(key):
             return
         total = len(self._log._read_messages(key))
         prefs_off = self._prefs_offset.get(key, 0)
@@ -1051,6 +1107,10 @@ class HistoryConsolidator:
         """Check all tracked sessions for idle-based history consolidation."""
         if _persistence_disabled():
             return
+        if not self._activity_seeded:
+            with contextlib.suppress(RuntimeError):  # no running loop: seed later
+                self._seed_task = asyncio.get_running_loop().create_task(self._seed_last_activity())
+                self._activity_seeded = True
         now = _time.time()
         for key, last in list(self._last_activity.items()):
             if now - last < self._history_idle_secs:
@@ -1059,7 +1119,7 @@ class HistoryConsolidator:
             if (
                 unconsolidated < 1
                 or now - self._history_consolidated.get(key, 0) < self._history_idle_secs
-                or key in self._running
+                or self._busy(key)
                 # Durable backoff, checked last so it only costs a metadata read
                 # once the cheap conditions pass. The in-memory throttle above is
                 # set only when the task ends without an exception and is lost on
@@ -1088,6 +1148,8 @@ class HistoryConsolidator:
                     and fut.result() is not _CONSOLIDATION_REFUSED
                 ):
                     self._history_consolidated[k] = ts
+                elif k in self._seeded_keys and not fut.cancelled() and fut.exception() is None:
+                    self._last_activity.pop(k, None)  # refused seed: not re-sent every sweep
 
             t.add_done_callback(_on_idle_done)
 
@@ -1103,7 +1165,7 @@ class HistoryConsolidator:
         _session_touched_sensitive() over its window before proposing anything,
         so sensitive sessions never produce skills regardless of entry point.
         """
-        if key in self._running:
+        if self._busy(key):
             return
         if _persistence_disabled():
             return

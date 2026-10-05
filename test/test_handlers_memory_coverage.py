@@ -1706,6 +1706,7 @@ class TestSubagentMemorySessionRecognition:
 def _consolidator() -> Any:
     c = MagicMock()
     c._running = set()
+    c._busy = lambda key: key in c._running
     c._tasks = set()
     c._consolidate = AsyncMock(return_value=None)
     return c

@@ -2302,7 +2302,7 @@ async def api_memory_consolidate(request: web.Request) -> web.Response:
     # an LLM turn on the same span. The claim is released again on every path
     # that does not hand the key to _consolidate, which discards it in its own
     # finally once the task ends.
-    if key in state.consolidator._running:
+    if state.consolidator._busy(key):  # another spelling of this transcript counts too
         return web.json_response({"error": "consolidation already running"}, status=409)
     state.consolidator._running.add(key)
     dispatched = False
