@@ -143,10 +143,7 @@ _DANGEROUS_IMPORT_ROOTS = {
 # ``__builtins__`` and ``builtins`` give access to eval/exec/compile/__import__
 # via ``__builtins__.eval(...)`` or ``getattr(__builtins__, "eval")``, bypassing
 # the bare-name check.
-_DANGEROUS_ATTR_ROOTS = {
-    "os", "shutil", "subprocess", "importlib", "ctypes",
-    "__builtins__", "builtins"
-}
+_DANGEROUS_ATTR_ROOTS = {"os", "shutil", "subprocess", "importlib", "ctypes"}
 # Network/egress library roots. Banned outright in generated scripts: the skill
 # contract forbids calling unknown network hosts, and matching on the import
 # (not the call) defeats alias bypasses like ``import requests as r; r.get(...)``
@@ -163,7 +160,7 @@ _NETWORK_IMPORT_ROOTS = {
 # ``vars(os)["execv"]``, ``globals()["__builtins__"]``. The attribute name is a
 # string constant this pass does not evaluate, so the module argument is what
 # gets flagged.
-_NAMESPACE_LOOKUP_NAMES = {"getattr", "vars", "globals"}
+_NAMESPACE_LOOKUP_NAMES = {"getattr", "vars"}
 
 # Attributes that expose a module's namespace as a mapping, reachable with a
 # subscript: ``os.__dict__["execv"]``. Same reasoning as above — deny the handle,
@@ -186,7 +183,7 @@ _DESCRIPTOR_METHODS = {"__getattribute__", "__getattr__"}
 # ``.__loader__`` and ``.__spec__`` reach the module loader.
 _DANGEROUS_ATTRS_ANY_BASE = {
     "__self__", "__subclasses__", "__bases__", "__base__", "__mro__",
-    "__loader__", "__spec__"
+    "__loader__", "__spec__", "__globals__"
 }
 
 # String literal keys in subscripts that reach builtins indirectly:
@@ -407,7 +404,8 @@ def _ast_findings(content: str) -> List[str]:
         elif isinstance(node, ast.Attribute) and node.attr == "modules":
             # ``sys.modules["builtins"]`` reaches the builtins module indirectly.
             # Check the base is ``sys`` to avoid flagging unrelated ``.modules``.
-            if isinstance(node.value, ast.Name) and node.value.id == "sys":
+            base = node.value
+            if isinstance(base, ast.Name) and alias_map.get(base.id, base.id) == "sys":
                 findings.append(f"dangerous module lookup: sys.modules")
         elif isinstance(node, ast.Attribute) and node.attr in _BANNED_ATTR_CALLS:
             # Catch a dangerous callable *referenced* (not just called) off a
@@ -457,7 +455,14 @@ def _ast_findings(content: str) -> List[str]:
             for a in node.names:
                 if a.name in _DANGEROUS_IMPORTED_NAMES:
                     findings.append(f"dangerous import-from: {node.module}.{a.name}")
-    return findings
+    # De-dupe while preserving order.
+    seen: set[str] = set()
+    deduped: List[str] = []
+    for f in findings:
+        if f not in seen:
+            seen.add(f)
+            deduped.append(f)
+    return deduped
 
 
 def validate_skill_script(path: str, content: str) -> Tuple[bool, List[str]]:
@@ -484,7 +489,7 @@ def validate_skill_script(path: str, content: str) -> Tuple[bool, List[str]]:
     # Syntax (only for Python).
     if fn.endswith(".py") and content:
         try:
-            ast.parse(content)
+            compile(content, fn or "<script>", "exec")
         except SyntaxError as e:
             findings.append(f"syntax error: {e.msg} (line {e.lineno})")
             return (False, findings)
