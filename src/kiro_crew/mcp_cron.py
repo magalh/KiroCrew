@@ -1898,9 +1898,11 @@ def _list_tools() -> list[dict[str, Any]]:
                         "~/.kiro/crew/crons/. Function receives a "
                         "ScriptContext and can raise Skip() to retry or Done() to "
                         "remove the job. Use ctx.notify() to deliver messages, and "
-                        "ctx.open_session() / ctx.send_to_session() to open and seed a "
-                        "dashboard session (never shell out to 'kirocrew token'; the "
-                        "sandboxed child is refused). "
+                        "ctx.open_session() / ctx.send_to_session() / "
+                        "ctx.set_session_mode() to open, seed and set the approval "
+                        "mode (trust or trust_reads) of a dashboard session (never "
+                        "shell out to 'kirocrew token'; the sandboxed child is "
+                        "refused). "
                         "When set, 'message' is passed to the script as ctx.message "
                         "(used for arguments) rather than being sent to an LLM.",
                     },

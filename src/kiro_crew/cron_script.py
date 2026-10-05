@@ -1160,12 +1160,14 @@ class ScriptContext:
     # ── Dashboard sessions ──
     #
     # A dispatcher cron lists the folder it files sessions in, opens a session
-    # there and seeds it with its first message. Each call goes to a ``/api/chat``
-    # route the internal secret already serves, with the same credential
-    # ``notify()`` presents; see the class docstring for why no dashboard token
-    # is involved. A cron bound to a crew member is admitted to the folder calls
-    # and refused on ``open_session`` and ``send_to_session`` by the member
-    # chat-control gate, the same answer that gate gives any member caller.
+    # there, seeds it with its first message and sets the session's approval
+    # mode so unattended work does not wait on a prompt. Each call goes to a
+    # ``/api/chat`` route the internal secret already serves, with the same
+    # credential ``notify()`` presents; see the class docstring for why no
+    # dashboard token is involved. A cron bound to a crew member is admitted to
+    # the folder calls and refused on ``open_session``, ``send_to_session`` and
+    # ``set_session_mode`` by the member chat-control gate, the same answer that
+    # gate gives any member caller.
 
     def list_session_folders(self) -> list[dict]:
         """Return the dashboard's session folders (``GET /api/chat/folders``).
@@ -1241,6 +1243,26 @@ class ScriptContext:
         result = self._post("/api/chat?ws=1", {"slot": slot, "message": redact(message)})
         if not isinstance(result, dict) or "error" in result:
             raise RuntimeError(f"send_to_session() failed: {self._reason(result)}")
+        return result
+
+    def set_session_mode(self, slot: str, mode: str) -> dict:
+        """Set the tool approval mode of *slot* (``POST /api/chat/mode``).
+
+        *mode* is ``"trust"`` (auto-approve every tool on that session) or
+        ``"trust_reads"`` (auto-approve read-only tools). Both are scoped to the
+        one session named and leave the process-global override alone. The
+        gateway refuses any other mode, ``yolo`` and ``normal`` included, with
+        ``mode_not_allowed``, a slot this cron did not open with ``not_creator``,
+        and the call itself with ``session_control_disabled`` while
+        ``agent.session_control`` is false; it audits each call and each refusal.
+        The mode is sent as given, so the gateway, not this method, is the one
+        place that rule lives. Returns the gateway's receipt, ``{"ok": True,
+        "mode": <mode>}``. Raises RuntimeError carrying the gateway's code if it
+        refuses or cannot be reached.
+        """
+        result = self._post("/api/chat/mode", {"slot": slot, "mode": mode})
+        if not isinstance(result, dict) or "error" in result:
+            raise RuntimeError(f"set_session_mode() failed: {self._reason(result)}")
         return result
 
     @staticmethod

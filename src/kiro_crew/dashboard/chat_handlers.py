@@ -200,8 +200,10 @@ from kiro_crew.dashboard.chat_utils import (
     tighten_replacement_to_restricted_original as _tighten_replacement_to_restricted_original,
 )
 from kiro_crew.dashboard.handlers._shared import (
+    _SLOT_SCOPED_TRUST_MODES,
     _owner_denial_response,
     cron_creator_refusal,
+    cron_mode_refusal,
     cron_slot_creator,
     read_bounded_json,
 )
@@ -345,13 +347,6 @@ _SESSION_RELOAD_NOTICE = (
     "Reloading session: relaunching the agent process with a freshly loaded "
     "agent spec, environment, and MCP servers. The conversation is preserved."
 )
-
-
-# Approval modes that grant auto-approval to the SLOT they name, as opposed to
-# the process-global YOLO grant. A tuple, not a set: membership is tested against
-# a request-supplied value, and tuple `in` compares by equality rather than
-# hashing, so a non-string body value answers False instead of raising.
-_SLOT_SCOPED_TRUST_MODES = ("trust", "trust_reads")
 
 
 def _sweep_stale_permissions(slot: "_ChatSlot") -> None:
@@ -9461,24 +9456,48 @@ async def api_chat_mode(request: web.Request) -> web.Response:
 
     Unlike the per-tool approve endpoint, this doesn't require a
     pending approval — it preemptively sets the mode for future tools.
+
+    A caller that presents an attested ``cron:<job id>`` key, which is what
+    ``ScriptContext.set_session_mode`` does, is held to ``trust`` and
+    ``trust_reads`` on one named slot that same cron created: the switch mirror
+    in ``private_chat_route_refusal`` answers first while session control is
+    off, ``cron_mode_refusal`` refuses every other mode and an unnamed slot, and
+    ``cron_creator_refusal`` refuses a slot another creator made. An admitted
+    call is recorded as ``mode_change:<mode>`` under the cron's own key. Each
+    refusal is recorded by ``_audit_cron_chat_denial`` as a ``chat.control``
+    denial attributed to ``internal``, naming the route, the slot and the mode,
+    the shape every cron-gate refusal on the chat routes shares.
     """
     state: DashboardState = request.app["state"]
     denied = await deny_session_approval_caller(request, "chat_mode")
     if denied is not None:
         return denied
     request_app = str(request.get("app") or "")
+    # The attested ``cron:<job id>`` key of a script cron, or ``""``. A cron sets
+    # one slot-scoped posture on a session it created and nothing else; the three
+    # checks below are the cron gate the other two chat routes already apply, and
+    # like those they key on the attested key the caller presents.
+    cron_creator = await cron_slot_creator(request)
 
     def audit_caller(dashboard_label: str) -> str:
-        """App tokens are attributed to the app; dashboard callers keep their
-        original per-site labels (slot, background, mode) so SEL history stays
-        comparable across releases."""
-        return f"app:{request_app}" if request_app else dashboard_label
+        """App tokens are attributed to the app, a cron to its own key; dashboard
+        callers keep their original per-site labels (slot, background, mode) so
+        SEL history stays comparable across releases."""
+        if request_app:
+            return f"app:{request_app}"
+        return cron_creator or dashboard_label
 
     body, body_err = await read_bounded_json(request)
     if body_err is not None:
         return body_err
     assert body is not None  # read_bounded_json returns (dict, None) on success
     mode = body.get("mode", "normal")
+    # A cron is held to ``trust`` / ``trust_reads`` on one named slot, before the
+    # mode reaches governance or the override: its ``yolo`` is refused as a cron's,
+    # whatever the policy says, and its unnamed slot is never the all-slots request.
+    cron_refused = await cron_mode_refusal(request, cron_creator, mode, body.get("slot"))
+    if cron_refused is not None:
+        return cron_refused
     # The grant is per-slot: Normal, Reads and Trust on ONE named user session.
     # YOLO is process-global and stays dashboard-only.
     if request_app and mode == "yolo":
@@ -9555,6 +9574,17 @@ async def api_chat_mode(request: web.Request) -> web.Response:
         # cannot tell it which session names are live.
         return slot_not_found() if request_app else denied
 
+    if cron_creator:
+        # The mode rule above refused an unnamed slot and the resolution above
+        # refused a dead one, so a cron reaches here with ONE live slot. Judge
+        # its creator now, with no await between that resolution and this read,
+        # so the fence judges the same slot object every branch below writes
+        # through. A slot the cron did not create answers 403 ``not_creator``.
+        assert slot is not None  # a cron names a slot, and it resolved above
+        fenced = await cron_creator_refusal(request, state, slot_key, cron_creator)
+        if fenced is not None:
+            return fenced
+
     if request_app:
         assert slot is not None  # app requests require and resolve a slot above
         # A FRESH grant read: the body upload and the governance check above
@@ -9584,9 +9614,16 @@ async def api_chat_mode(request: web.Request) -> web.Response:
     #
     # An app token never touches the global override: its ``normal`` on one
     # slot must not end the operator's YOLO grant on every other slot.
+    #
+    # Nor does a ``cron:`` caller. The mode rule above already holds it to a
+    # slot-scoped ``trust`` or ``trust_reads``, and ``set_session_mode`` promises
+    # that both leave the global override alone, declared or not: a scheduled run
+    # asking for auto-approval on the one session it opened is never the
+    # documented action that ends the operator's grant everywhere else.
     slot_scoped_trust = slot_key is not None and mode in _SLOT_SCOPED_TRUST_MODES
     if (
         not request_app
+        and not cron_creator
         and mode != "yolo"
         and (not slot_scoped_trust or safety_override().is_declared)
     ):

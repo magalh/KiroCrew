@@ -1648,26 +1648,34 @@ folder tools individually.
 
 The chat routes check the switch for a script cron as well. While it is off, the
 gateway refuses a caller that presents a `cron:` session key on
-`POST /api/chat/slots` and `POST /api/chat` with `session_control_disabled`. These
-are the two routes `ScriptContext.open_session` and
-`ScriptContext.send_to_session` call. The check is `_cron_session_control_refusal`
+`POST /api/chat/slots`, `POST /api/chat` and `POST /api/chat/mode` with
+`session_control_disabled`. These are the three routes
+`ScriptContext.open_session`, `ScriptContext.send_to_session` and
+`ScriptContext.set_session_mode` call. The check is `_cron_session_control_refusal`
 in `private_chat_route_refusal`, the gate every internal chat-route call passes
 after the internal secret validates, and it answers with the same 403 body the
-session-control routes send. The same two routes apply this module's creator
+session-control routes send. The same three routes apply this module's creator
 fence to a `cron:` caller: `cron_creator_refusal` in the chat handlers refuses a
 key whose slot was not created by that `cron:` key with 403 `not_creator`, the
 code `authorize_target` answers. A live slot is judged on its `_created_by`
 through `_created_by_other`. A key with no live slot is judged on the
 `created_by` its persisted metadata line records, so a cron cannot mint a
 closed session's key as its own, and a key with neither a slot nor a transcript
-is left to mint as the cron's own. `_cron_session_control_refusal` and
+is left to mint as the cron's own on the two routes that mint; the mode route
+mints nothing and runs the fence on the live slot it resolved. The mode route
+adds one rule of its own, `cron_mode_refusal`: a `cron:` caller sets `trust` or
+`trust_reads` on the one slot it names, and every other mode, `yolo` and
+`normal` included, answers 403 `mode_not_allowed` before governance or the
+safety override is consulted, while an unnamed slot answers 400 `slot_required`
+rather than the owner's all-slots grant. `_cron_session_control_refusal` and
 `cron_creator_refusal` are mirrors of this module's cron gate, the switch gate
 and the `_created_by_other` fence, not a second rule: a change to how this
-module gates a cron must change those helpers with it. Both checks key on the
-key the caller presents, so they are a courtesy for `ScriptContext` callers and
-do not stop a holder of the internal secret. Owner and member callers are
-unaffected and keep their own gates. The folder routes are not gated, because
-folders are not session control.
+module gates a cron must change those helpers with it. All three checks key on
+the key the caller presents, so they are a courtesy for `ScriptContext` callers
+and do not stop a holder of the internal secret. Each refusal is audited through
+one shared write, `_audit_cron_chat_denial`, as a `chat.control` denial. Owner
+and member callers are unaffected and keep their own gates. The folder routes
+are not gated, because folders are not session control.
 
 A slot a `cron:` caller opens on either route is labelled cron-created:
 `cron_slot_creator` reads the attested key off the scope the gate resolved, and
