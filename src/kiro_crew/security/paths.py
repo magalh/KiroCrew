@@ -1928,6 +1928,30 @@ def _mark_stalled(prefix: str, budget: float) -> None:
 _UNC_PREFIX_RE = re.compile(r"^[\\/]{2}[^\\/]")
 _ON_WINDOWS = os.name == "nt"
 
+#: ``\\?\C:``, ``\\.\C:``, ``//?/C:`` and ``\??\C:``: Win32 and NT namespace
+#: spellings of a LOCAL drive path. Only a drive-letter remainder is folded; a UNC
+#: share, a volume GUID or any other namespace keeps its spelling.
+_WIN_LOCAL_NS_RE = re.compile(r"^(?:[\\/]{2}[?.]|\\\?\?)[\\/](?=[A-Za-z]:(?:[\\/]|$))")
+#: A trailing default data stream or directory index names the file or directory itself.
+_WIN_DEFAULT_STREAM_RE = re.compile(
+    r"(?:::\$DATA|::\$INDEX_ALLOCATION|:\$I30:\$INDEX_ALLOCATION)$", re.IGNORECASE
+)
+
+
+def _fold_windows_alias(path: str) -> str:
+    """Fold a Windows alias of a local path to its plain spelling, lexically (no I/O).
+
+    Strips a leading local-drive namespace prefix (``\\\\?\\``, ``\\\\.\\``,
+    ``//?/``, ``\\??\\``) and a trailing default-stream suffix (``::$DATA``,
+    ``::$INDEX_ALLOCATION``, ``:$I30:$INDEX_ALLOCATION``), each of which opens the
+    same file as the plain spelling. A named stream (``file:zone``) is a different
+    object and is left alone. Off Windows those characters are ordinary file-name
+    bytes, so the input is returned unchanged.
+    """
+    if not _ON_WINDOWS:
+        return path
+    return _WIN_DEFAULT_STREAM_RE.sub("", _WIN_LOCAL_NS_RE.sub("", path, count=1))
+
 
 def _is_unc_path(expanded: str) -> bool:
     """``\\\\server\\share\\...`` in either separator spelling.
@@ -2209,7 +2233,12 @@ def _candidate_forms(
     :func:`is_sensitive_resolved_path`; see there for why a caller may claim it.
     """
     # Expand ~ and $HOME
-    expanded = os.path.expanduser(os.path.expandvars(path_str))
+    raw = os.path.expanduser(os.path.expandvars(path_str))
+    # Windows aliases of a local path are folded BEFORE anchoring and resolution,
+    # so the plain spelling is what gets resolved (a ``\\?\`` spelling is
+    # UNC-shaped and would skip resolution, so a junction would go unfollowed). The raw
+    # spelling stays a lexical candidate: folding only ever adds candidates.
+    expanded = _fold_windows_alias(raw)
 
     # Anchor a relative input against the supplied workspace dir so it resolves
     # to the real file rather than the gateway's CWD.  Absolutize base_dir
@@ -2230,6 +2259,9 @@ def _candidate_forms(
     candidates: set[str] = set() if pre_resolved else _resolved_forms_bounded(expanded)
     candidates.add(os.path.normpath(expanded))
     candidates.add(expanded)
+    if raw != expanded:
+        candidates.add(os.path.normpath(raw))
+        candidates.add(raw)
     return candidates
 
 
@@ -3443,7 +3475,7 @@ def is_sensitive_resolved_path(resolved: str) -> bool:
     same mount would. Nothing is admitted while it blocks.
     """
     return _path_in_home_dirs(resolved, _SENSITIVE_HOME_DIRS, pre_resolved=True) or (
-        resolved.casefold().endswith(_KEYSTONE_ARTIFACT_SUFFIXES)
+        _fold_windows_alias(resolved).casefold().endswith(_KEYSTONE_ARTIFACT_SUFFIXES)
         and _is_keystone_publish_artifact(resolved, pre_resolved=True)
     )
 
