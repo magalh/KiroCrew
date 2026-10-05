@@ -44,6 +44,7 @@ from kiro_crew.metrics.sessions import (
     record_sessions_ended,
 )
 from kiro_crew.process_identity import ProcessHandle, process_handle_of
+from kiro_crew.session_pool import pool_kiro_agent
 from kiro_crew.start_priority import PrioritySemaphore
 
 CancelOutcome = Literal["acked", "timeout", "no_turn", "error"]
@@ -1198,11 +1199,7 @@ class SessionLifecycleService:
                 # OLD pool size and agent, and the TTL was never re-adopted by
                 # any path. Same clamp as WarmSessionPool._state_from_owner.
                 owner._pool_size = min(constants.max_pool, max(0, cfg.session.pool_size))
-                owner._pool_agent = cfg.session.pool_agent or getattr(
-                    cfg.agent,
-                    "default_agent",
-                    "",
-                )
+                owner._pool_agent = pool_kiro_agent(cfg)
                 owner._pool_ttl_secs = max(0, cfg.session.pool_ttl_secs)
                 owner._pool_cwd = pool_cwd
                 while not owner._warm_pool.empty():
@@ -1248,11 +1245,7 @@ class SessionLifecycleService:
                 # handler that loads a disk-edited pool_ttl_secs must not evict
                 # the warm pool at the stale TTL until the watcher's next cycle.
                 owner._pool_size = min(constants.max_pool, max(0, cfg.session.pool_size))
-                owner._pool_agent = cfg.session.pool_agent or getattr(
-                    cfg.agent,
-                    "default_agent",
-                    "",
-                )
+                owner._pool_agent = pool_kiro_agent(cfg)
                 owner._pool_ttl_secs = max(0, cfg.session.pool_ttl_secs)
                 owner._pool_cwd = pool_cwd
                 while not owner._warm_pool.empty():
