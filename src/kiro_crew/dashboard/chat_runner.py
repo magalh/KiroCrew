@@ -6473,6 +6473,22 @@ def _is_own_recovery(items: "list[dict]", predecessor_actor: str, predecessor_tu
 _REPLAYS_COMPLETION_KEY = "_replays_completion"
 
 
+def subagents_hold_user_messages(state: DashboardState, session_key: str) -> bool:
+    """Whether a live child of *session_key* should keep user messages queued.
+
+    A child the reaper has flagged ``stalled`` (see
+    ``_maybe_flag_stall_impl``) does not hold the queue: a child that died
+    before its completion path ran never sets ``done``, so counting it parks
+    every user message until the wall-clock timeout. The flag clears when the
+    child streams again, and the hold with it.
+    """
+    subs = state.subagents
+    if subs is None:
+        return False
+    agents = subs.running_agents_for(session_key) or []
+    return any(not (isinstance(a, dict) and a.get("stalled")) for a in agents)
+
+
 async def _start_next_queued_turn(
     state: DashboardState,
     slot: _ChatSlot,
@@ -6697,8 +6713,7 @@ async def _start_next_queued_turn(
     hold_users = bool(
         (
             not allow_user_during_subagents
-            and state.subagents is not None
-            and state.subagents.running_agents_for(effective_session_key(slot))
+            and subagents_hold_user_messages(state, effective_session_key(slot))
         )
         or in_stage
     )

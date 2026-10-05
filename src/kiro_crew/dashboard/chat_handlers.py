@@ -150,6 +150,7 @@ from kiro_crew.dashboard.chat_runner import (
     _sync_served_model,
     context_entry_expired,
     schedule_eager_spawn,
+    subagents_hold_user_messages,
 )
 from kiro_crew.dashboard.chat_slack import maybe_auto_link_slack, slot_is_live
 from kiro_crew.dashboard.chat_summary import generate_session_summary, read_cached_intent_summary
@@ -1346,11 +1347,18 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     # Opt-out: if the user explicitly chose steer mode, honour it — start a new
     # turn immediately so the message is processed without waiting for children.
     # An app on a session it does not own has no opt-out (`steer` is None there).
-    if (
-        not steer
+    _sub_key = effective_session_key(slot)
+    _held = subagents_hold_user_messages(state, _sub_key)
+    # Messages parked while a child was live stay parked once it is flagged
+    # stalled (nothing starts a drain then). A send behind them joins the queue
+    # and drains it, so it is answered after them rather than ahead of them.
+    _behind_parked = bool(
+        not _held
+        and slot._queue
         and state.subagents is not None
-        and state.subagents.running_agents_for(effective_session_key(slot))
-    ):
+        and state.subagents.running_agents_for(_sub_key)
+    )
+    if not steer and (_held or _behind_parked):
         # circular import: session_control imports this package's modules at module level.
         from kiro_crew.dashboard.session_control import containment_meta
 
@@ -1396,6 +1404,8 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         if _hold_meta.get("quote"):
             _hold_push.setdefault("meta", {})["quote"] = _hold_meta["quote"]
         state.broadcast_ws("queue_push", _hold_push)
+        if _behind_parked:
+            await _start_next_queued_turn(state, slot)
         # Same receipt contract as the busy-slot queue branch: `queue_id` binds
         # the sender's pre-send composer state to this exact entry. An entry the
         # durable bounds refuse is reported in the log by the call above, not on
