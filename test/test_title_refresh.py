@@ -1408,6 +1408,284 @@ class TestSlotCreatePinIsFinal:
         assert slot.title == "Pinned by caller"
 
 
+class TestScriptCronSlotCreateTitles:
+    _CRON_KEY = "cron:nightly-dispatcher"
+
+    @staticmethod
+    def _make_route(tmp_path, monkeypatch, *, cron: bool):
+        from unittest.mock import AsyncMock
+
+        from aiohttp import web
+        from chat_test_helpers import _make_ready_kiro_prerequisite
+
+        from kiro_crew.dashboard import chat_handlers
+        from kiro_crew.dashboard.chat import api_chat_slot_create
+        from kiro_crew.dashboard.state import DashboardState
+        from kiro_crew.history import ConversationLog
+
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        sessions = MagicMock(count=0)
+        sessions.remove = AsyncMock()
+        sessions.recycle_background = AsyncMock()
+        sessions.get_pid = MagicMock(return_value=None)
+        state = DashboardState(
+            sessions=sessions,
+            crons=MagicMock(
+                list_jobs=MagicMock(return_value=[]), status=MagicMock(return_value={})
+            ),
+            lessons=MagicMock(load_all=MagicMock(return_value=[])),
+            start_time=0.0,
+            conversation_log=ConversationLog(base_dir=tmp_path),
+        )
+        state.kiro_prerequisite_service = _make_ready_kiro_prerequisite()
+        if cron:
+
+            async def _cron_creator(_request):
+                return TestScriptCronSlotCreateTitles._CRON_KEY
+
+            monkeypatch.setattr(chat_handlers, "cron_slot_creator", _cron_creator)
+
+        app = web.Application()
+        app["state"] = state
+        app.router.add_post("/api/chat/slots", api_chat_slot_create)
+        return state, app
+
+    @pytest.mark.asyncio
+    async def test_a_cron_reopen_keeps_a_user_renamed_title(self, tmp_path, monkeypatch):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        state, app = self._make_route(tmp_path, monkeypatch, cron=True)
+        slot = state.get_or_create_slot("nightly-dispatch")
+        slot.title = "User renamed title"
+        slot._titled = True
+        slot._title_origin = _TITLE_ORIGIN_USER
+        slot._title_epoch = 4
+        slot._created_by = self._CRON_KEY
+
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post(
+                "/api/chat/slots",
+                json={"name": "nightly-dispatch", "title": "Nightly dispatch"},
+            )
+
+        assert response.status == 200
+        assert slot.title == "User renamed title"
+        assert slot._title_origin == _TITLE_ORIGIN_USER
+        assert slot._title_epoch == 4
+
+    @pytest.mark.asyncio
+    async def test_a_cron_reopens_a_closed_session_with_its_saved_title(
+        self, tmp_path, monkeypatch
+    ):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_crew.dashboard.chat_api.slot_lifecycle import close_slot
+
+        state, app = self._make_route(tmp_path, monkeypatch, cron=True)
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post(
+                "/api/chat/slots",
+                json={"name": "nightly-dispatch", "title": "Nightly dispatch"},
+            )
+            assert response.status == 200
+
+            slot = state._slots["nightly-dispatch"]
+            slot.append("user", "Keep this saved session")
+            slot.title = "User renamed title"
+            slot._titled = True
+            slot._title_origin = _TITLE_ORIGIN_USER
+            slot._title_epoch = 4
+            slot.created_at = "2000-01-01T00:00:00+00:00"
+            await close_slot(state, slot, slot.key)
+            assert "nightly-dispatch" not in state._slots
+            persisted = state.conversation_log.get_metadata("dashboard:nightly-dispatch")
+            assert persisted["title"] == "User renamed title"
+            assert persisted["title_origin"] == _TITLE_ORIGIN_USER
+            assert persisted["created_by"] == self._CRON_KEY
+            saved_created_at = persisted["created_at"]
+
+            response = await client.post(
+                "/api/chat/slots",
+                json={"name": "nightly-dispatch", "title": "Nightly dispatch"},
+            )
+
+        assert response.status == 200
+        reopened = state._slots["nightly-dispatch"]
+        assert reopened.title == "User renamed title"
+        assert reopened._title_origin == _TITLE_ORIGIN_USER
+        assert reopened._titled is True
+        assert reopened.created_at != saved_created_at
+
+        calls = _patch_generator(monkeypatch, "Model replacement")
+        reopened.messages = [
+            {"role": "user", "content": f"message {index}"}
+            for index in range(_TITLE_REFRESH_MILESTONES[0])
+        ]
+        await maybe_refresh_title(_fake_state(), reopened)
+        assert calls == []
+        assert reopened.title == "User renamed title"
+
+        persisted = state.conversation_log.get_metadata("dashboard:nightly-dispatch")
+        assert persisted["title"] == "User renamed title"
+        assert persisted["title_origin"] == _TITLE_ORIGIN_USER
+
+    @pytest.mark.asyncio
+    async def test_a_closed_cron_reopen_rebases_the_auto_title_mark(self, tmp_path, monkeypatch):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_crew.dashboard.chat_api.slot_lifecycle import close_slot
+
+        state, app = self._make_route(tmp_path, monkeypatch, cron=True)
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post(
+                "/api/chat/slots",
+                json={"name": "nightly-dispatch", "title": "Nightly dispatch"},
+            )
+            assert response.status == 200
+
+            slot = state._slots["nightly-dispatch"]
+            for index in range(30):
+                slot.append("user", f"saved message {index}")
+            slot.title = "Saved automatic title"
+            slot._titled = True
+            slot._title_origin = _TITLE_ORIGIN_AUTO
+            slot._title_refresh_mark = 30
+            slot._created_by = self._CRON_KEY
+            await close_slot(state, slot, slot.key)
+
+            response = await client.post(
+                "/api/chat/slots",
+                json={"name": "nightly-dispatch", "title": "Nightly dispatch"},
+            )
+
+        assert response.status == 200
+        reopened = state._slots["nightly-dispatch"]
+        assert reopened.messages == []
+        assert reopened.title == "Saved automatic title"
+        assert reopened._title_origin == _TITLE_ORIGIN_AUTO
+        assert reopened._title_refresh_mark == _rehydrated_refresh_mark(30, 0)
+
+        calls = _patch_generator(monkeypatch, "Refreshed automatic title")
+        monkeypatch.setattr(chat_title, "_title_refresh_every", lambda: 10)
+        reopened.messages = [
+            {"role": "user", "content": f"new message {index}"} for index in range(30)
+        ]
+        await maybe_refresh_title(_fake_state(), reopened)
+        assert calls == ["Saved automatic title"]
+        assert reopened.title == "Refreshed automatic title"
+
+    @pytest.mark.asyncio
+    async def test_a_closed_cron_reopen_runs_the_new_slot_steps(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_crew.dashboard import chat_handlers
+        from kiro_crew.dashboard.chat_api.slot_lifecycle import close_slot
+
+        state, app = self._make_route(tmp_path, monkeypatch, cron=True)
+        slot = state.get_or_create_slot("nightly-dispatch")
+        slot.append("user", "Keep this saved session")
+        slot.title = "User renamed title"
+        slot._titled = True
+        slot._title_origin = _TITLE_ORIGIN_USER
+        slot._created_by = self._CRON_KEY
+        slot.created_at = "2000-01-01T00:00:00+00:00"
+        await close_slot(state, slot, slot.key)
+
+        folder_id = "folder-1"
+        state._folders = [
+            {
+                "id": folder_id,
+                "name": "Reports",
+                "parent_id": None,
+                "hidden": False,
+                "tags": ["tag-1"],
+            }
+        ]
+        state._tags = [{"id": "tag-1", "name": "Report", "color": "#6b7280", "order": 0}]
+        state._tags_authoritative = True
+
+        pin_store = AsyncMock(return_value="")
+        record_selection = AsyncMock(return_value=None)
+        cfg = SimpleNamespace(
+            default_agent="",
+            dashboard=SimpleNamespace(default_project=""),
+        )
+        monkeypatch.setattr(chat_handlers, "pin_private_agent_store", pin_store)
+        monkeypatch.setattr(chat_handlers, "_record_explicit_agent_selection", record_selection)
+        monkeypatch.setattr(
+            chat_handlers,
+            "resolve_agent_bindings",
+            lambda *_args, **_kwargs: SimpleNamespace(selection_kind=""),
+        )
+        monkeypatch.setattr(chat_handlers.KiroCrewConfig, "load", staticmethod(lambda: cfg))
+        monkeypatch.setattr(chat_handlers, "is_owner_dashboard_request", lambda _request: True)
+        monkeypatch.setattr(chat_handlers, "default_project_dir", lambda _workspace: "")
+        monkeypatch.setattr(chat_handlers, "schedule_eager_spawn", lambda *_args, **_kwargs: None)
+
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post(
+                "/api/chat/slots",
+                json={
+                    "name": "nightly-dispatch",
+                    "title": "Nightly dispatch",
+                    "folder_id": folder_id,
+                },
+                headers={"X-Internal-Secret": "test"},
+            )
+
+        assert response.status == 200
+        reopened = state._slots["nightly-dispatch"]
+        assert reopened.title == "User renamed title"
+        assert reopened._title_origin == _TITLE_ORIGIN_USER
+        assert reopened._created_by == self._CRON_KEY
+        assert reopened.created_at != "2000-01-01T00:00:00+00:00"
+        assert reopened.folder_id == folder_id
+        assert reopened.tags == ["tag-1"]
+        pin_store.assert_awaited_once()
+        record_selection.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_cron_new_slot_gets_the_pinned_title(self, tmp_path, monkeypatch):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        state, app = self._make_route(tmp_path, monkeypatch, cron=True)
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post(
+                "/api/chat/slots",
+                json={"name": "nightly-dispatch", "title": "Nightly dispatch"},
+            )
+
+        assert response.status == 200
+        slot = state._slots["nightly-dispatch"]
+        assert slot.title == "Nightly dispatch"
+        assert slot._titled is True
+        assert slot._title_origin == _TITLE_ORIGIN_USER
+
+    @pytest.mark.asyncio
+    async def test_a_non_cron_reopen_still_replaces_the_title(self, tmp_path, monkeypatch):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        state, app = self._make_route(tmp_path, monkeypatch, cron=False)
+        slot = state.get_or_create_slot("manual-session")
+        slot.title = "Current title"
+        slot._titled = True
+        slot._title_origin = _TITLE_ORIGIN_USER
+        slot._title_epoch = 2
+
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post(
+                "/api/chat/slots",
+                json={"name": "manual-session", "title": "Replacement title"},
+            )
+
+        assert response.status == 200
+        assert slot.title == "Replacement title"
+        assert slot._title_origin == _TITLE_ORIGIN_USER
+        assert slot._title_epoch == 3
+
+
 # ── server-review regressions: resume hydration, pin persistence, cancel path ─
 class TestResumeRehydratesProvenance:
     """The HTTP resume path is the THIRD slot-hydration path; it must restore

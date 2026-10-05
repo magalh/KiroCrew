@@ -1655,7 +1655,7 @@ gateway refuses a caller that presents a `cron:` session key on
 in `private_chat_route_refusal`, the gate every internal chat-route call passes
 after the internal secret validates, and it answers with the same 403 body the
 session-control routes send. The same three routes apply this module's creator
-fence to a `cron:` caller: `cron_creator_refusal` in the chat handlers refuses a
+fence to a `cron:` caller: `cron_creator_admission` in the chat handlers refuses a
 key whose slot was not created by that `cron:` key with 403 `not_creator`, the
 code `authorize_target` answers. A live slot is judged on its `_created_by`
 through `_created_by_other`. A key with no live slot is judged on the
@@ -1668,7 +1668,7 @@ adds one rule of its own, `cron_mode_refusal`: a `cron:` caller sets `trust` or
 `normal` included, answers 403 `mode_not_allowed` before governance or the
 safety override is consulted, while an unnamed slot answers 400 `slot_required`
 rather than the owner's all-slots grant. `_cron_session_control_refusal` and
-`cron_creator_refusal` are mirrors of this module's cron gate, the switch gate
+`cron_creator_admission` are mirrors of this module's cron gate, the switch gate
 and the `_created_by_other` fence, not a second rule: a change to how this
 module gates a cron must change those helpers with it. All three checks key on
 the key the caller presents, so they are a courtesy for `ScriptContext` callers

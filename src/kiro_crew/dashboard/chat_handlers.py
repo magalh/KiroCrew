@@ -202,7 +202,7 @@ from kiro_crew.dashboard.chat_utils import (
 from kiro_crew.dashboard.handlers._shared import (
     _SLOT_SCOPED_TRUST_MODES,
     _owner_denial_response,
-    cron_creator_refusal,
+    cron_creator_admission,
     cron_mode_refusal,
     cron_slot_creator,
     read_bounded_json,
@@ -853,9 +853,9 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     # awaits stay outside it.
     cron_creator = await cron_slot_creator(request)
     if cron_creator:
-        fenced = await cron_creator_refusal(request, state, slot_name, cron_creator)
-        if fenced is not None:
-            return fenced
+        refusal, _, _ = await cron_creator_admission(request, state, slot_name, cron_creator)
+        if refusal is not None:
+            return refusal
     relay_requested = request.query.get("relay") == "1"
     if relay_requested:
         relay_key = _normalize_slot_key(slot_name) if slot_name else ""
@@ -2520,19 +2520,29 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     # Resolved before the mint decision below: nothing may await between that
     # read and `get_or_create_slot`, and these are the two awaits this path adds.
     cron_creator = await cron_slot_creator(request)
+    persisted_cron_slot = False
+    persisted_cron_meta: dict[str, Any] = {}
     if cron_creator and name:
-        fenced = await cron_creator_refusal(request, state, str(name), cron_creator)
-        if fenced is not None:
-            return fenced
+        refusal, persisted_cron_slot, persisted_cron_meta = await cron_creator_admission(
+            request, state, str(name), cron_creator
+        )
+        if refusal is not None:
+            return refusal
 
-    # Whether this request will MINT a genuinely new slot, decided before
-    # get_or_create_slot runs. `name` can address an already-open slot (the
-    # handler is also the rehydrate/reopen path), which returns unchanged — and
-    # folder-tag inheritance must fire ONLY for a fresh chat, never re-stamp
-    # tags onto a session the user is merely re-opening inside the folder.
+    # Whether this request will MINT a new live slot, decided before
+    # get_or_create_slot runs. `name` can address an already-open slot, which
+    # returns unchanged. A persisted key with no live slot still follows the
+    # normal create path. Its saved title is handled separately below.
     # Computed on the normalized key, which is the key the slot store is built
-    # from; an omitted (or degenerate) name is always a mint.
+    # from; an omitted or degenerate name is always a mint. The creator fence
+    # already read any saved cron state before this decision.
     _requested_key = _normalize_slot_key(str(name)) if name else ""
+    reopening_persisted_cron = bool(
+        cron_creator
+        and _requested_key
+        and persisted_cron_slot
+        and _requested_key not in state._slots
+    )
     is_new_slot = not _requested_key or _requested_key not in state._slots
     # A named NEW app slot must not land on a transcript the app does not own:
     # the slot's first save would stamp the app onto that metadata line, which is
@@ -2625,6 +2635,19 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                     exc,
                 )
             return web.json_response({"error": str(exc)}, status=409)
+        if reopening_persisted_cron:
+            # The creator fence already loaded and authorized this metadata
+            # snapshot. Reuse it so a closed-session reopen restores the user's
+            # saved title provenance without a second store read.
+            persisted_title = persisted_cron_meta.get("title")
+            if isinstance(persisted_title, str) and persisted_title:
+                _rehydrate_slot_title(
+                    slot,
+                    persisted_title,
+                    titled=True,
+                    metadata=persisted_cron_meta,
+                )
+                _rebase_rehydrated_refresh_mark(slot)
         if cron_creator and is_new_slot:
             # Same attribution as the send auto-create: a cron-opened slot
             # carries its creator and never reads as a person's own tab.
@@ -2687,8 +2710,12 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         denied = deny_app_slot_session_access(request_app, slot, slot.key, "chat_slot_create")
         if denied is not None:
             return denied
-        # Pin title if explicitly provided (prevents auto-title from overwriting)
+        # Pin title if explicitly provided (prevents auto-title from overwriting).
+        # A cron caller uses this route as both create and reopen. Its title names
+        # the new session, but a later reopen must not undo a user's rename.
         title = (body.get("title") or "").strip()[:200] if isinstance(body, dict) else ""
+        if cron_creator and (not is_new_slot or reopening_persisted_cron):
+            title = ""
         # An adopted session takes the PEER's title, ahead of anything the caller
         # sent. It is the label the user just clicked in the merged list, so
         # opening it under a different one — or under a local auto-title generated
@@ -9462,7 +9489,7 @@ async def api_chat_mode(request: web.Request) -> web.Response:
     ``trust_reads`` on one named slot that same cron created: the switch mirror
     in ``private_chat_route_refusal`` answers first while session control is
     off, ``cron_mode_refusal`` refuses every other mode and an unnamed slot, and
-    ``cron_creator_refusal`` refuses a slot another creator made. An admitted
+    ``cron_creator_admission`` refuses a slot another creator made. An admitted
     call is recorded as ``mode_change:<mode>`` under the cron's own key. Each
     refusal is recorded by ``_audit_cron_chat_denial`` as a ``chat.control``
     denial attributed to ``internal``, naming the route, the slot and the mode,
@@ -9581,9 +9608,9 @@ async def api_chat_mode(request: web.Request) -> web.Response:
         # so the fence judges the same slot object every branch below writes
         # through. A slot the cron did not create answers 403 ``not_creator``.
         assert slot is not None  # a cron names a slot, and it resolved above
-        fenced = await cron_creator_refusal(request, state, slot_key, cron_creator)
-        if fenced is not None:
-            return fenced
+        refusal, _, _ = await cron_creator_admission(request, state, slot_key, cron_creator)
+        if refusal is not None:
+            return refusal
 
     if request_app:
         assert slot is not None  # app requests require and resolve a slot above

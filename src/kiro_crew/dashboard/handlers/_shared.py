@@ -1076,10 +1076,10 @@ async def cron_slot_creator(request: web.Request) -> str:
     return session
 
 
-async def cron_creator_refusal(
+async def cron_creator_admission(
     request: web.Request, state: Any, slot_name: str | None, cron_creator: str
-) -> web.Response | None:
-    """The creator fence for a ``cron:`` caller on the chat routes, or ``None``.
+) -> tuple[web.Response | None, bool, dict[str, Any]]:
+    """Judge a ``cron:`` caller and return its refusal and persisted snapshot.
 
     A script cron opens a slot with ``POST /api/chat/slots``, seeds it with
     ``POST /api/chat`` and sets its approval mode with ``POST /api/chat/mode``.
@@ -1099,50 +1099,59 @@ async def cron_creator_refusal(
     therefore makes its mint decision with no await after this returns. The
     mode route mints nothing and calls this only once its slot is live, so for
     it the whole judgement is the synchronous ``_created_by`` read.
+    The persisted flag and metadata describe the same read used for the creator
+    verdict, so the create caller restores a closed session's saved title
+    without a second store lookup.
     """
     if not cron_creator or not slot_name:
-        return None
+        return None, False, {}
     key = _normalize_slot_key(str(slot_name))
     if not key:
-        return None
+        return None, False, {}
     from kiro_crew.dashboard.session_control import _created_by_other
 
+    persisted = False
+    persisted_meta: dict[str, Any] = {}
     slot = state._slots.get(key)
     if slot is None:
         log = getattr(state, "conversation_log", None)
         if log is None:
-            return None
+            return None, False, {}
         from kiro_crew.dashboard.chat_utils import slot_transcript_key
 
         history_key = slot_transcript_key(key)
 
-        def _persisted_creator() -> str | None:
+        def _persisted_slot() -> tuple[bool, dict[str, Any]]:
             if not log.has_log(history_key):
-                return None
-            meta = log.get_metadata(history_key)
-            return str(meta.get("created_by") or "")
+                return False, {}
+            return True, log.get_metadata(history_key)
 
         try:
-            persisted = await asyncio.to_thread(_persisted_creator)
+            persisted, persisted_meta = await asyncio.to_thread(_persisted_slot)
         except Exception:
             logger.debug("persisted creator of slot %s unreadable", key, exc_info=True)
             refused = True
         else:
-            refused = persisted is not None and _created_by_other(
-                SimpleNamespace(_created_by=persisted), cron_creator
+            refused = persisted and _created_by_other(
+                SimpleNamespace(_created_by=str(persisted_meta.get("created_by") or "")),
+                cron_creator,
             )
         slot = state._slots.get(key)
         if slot is None and not refused:
-            return None
+            return None, persisted, persisted_meta
     if slot is not None and not _created_by_other(slot, cron_creator):
-        return None
+        return None, persisted, persisted_meta
     await _audit_cron_chat_denial(request, "not_creator", f"{request.path} slot={key}")
-    return web.json_response(
-        {
-            "error": "a scheduled run can only control sessions it created itself",
-            "code": "not_creator",
-        },
-        status=403,
+    return (
+        web.json_response(
+            {
+                "error": "a scheduled run can only control sessions it created itself",
+                "code": "not_creator",
+            },
+            status=403,
+        ),
+        persisted,
+        persisted_meta,
     )
 
 
@@ -1170,7 +1179,7 @@ async def cron_mode_refusal(
     cron asking for ``yolo`` is refused as a cron before the request reaches
     governance or the safety override, and whatever the slot. A mode that is not
     a string at all, a list say, is refused the same way rather than raising. The
-    creator fence, :func:`cron_creator_refusal`, is the handler's job once the
+    creator fence, :func:`cron_creator_admission`, is the handler's job once the
     slot resolves. Like the other two checks, this keys on the attested key the
     caller presents.
     """
